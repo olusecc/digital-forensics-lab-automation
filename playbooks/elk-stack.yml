@@ -92,8 +92,8 @@
 
           filter {
             # Add timestamp processing
-            if ![timestamp] and [@timestamp] {
-              mutate { add_field => { "timestamp" => "%{@timestamp}" } }
+            mutate { 
+              add_field => { "timestamp" => "%{@timestamp}" } 
             }
 
             # Parse Autopsy data
@@ -154,32 +154,8 @@
 
           output {
             elasticsearch {
-              hosts => ["localhost:9200"]
+              hosts => ["elasticsearch:9200"]
               index => "forensics-%{type}-%{+YYYY.MM.dd}"
-              template_name => "forensics"
-              template_pattern => "forensics-*"
-              template => {
-                "settings" => {
-                  "number_of_shards" => 1,
-                  "number_of_replicas" => 0,
-                  "index.mapping.total_fields.limit" => 10000
-                },
-                "mappings" => {
-                  "properties" => {
-                    "@timestamp" => { "type" => "date" },
-                    "case_id" => { "type" => "keyword" },
-                    "evidence_id" => { "type" => "keyword" },
-                    "file_path" => { "type" => "text", "analyzer" => "standard" },
-                    "file_hash" => { "type" => "keyword" },
-                    "process_name" => { "type" => "keyword" },
-                    "ip_address" => { "type" => "ip" },
-                    "url" => { "type" => "text" },
-                    "malware_family" => { "type" => "keyword" },
-                    "ioc_match" => { "type" => "boolean" },
-                    "threat_score" => { "type" => "integer" }
-                  }
-                }
-              }
             }
             
             stdout {
