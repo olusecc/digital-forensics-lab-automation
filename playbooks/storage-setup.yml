@@ -1,0 +1,70 @@
+---
+- name: Configure NFS Server on Forensics Server
+  hosts: forensics
+  become: yes
+  tasks:
+    - name: Install NFS server
+      apt:
+        name: 
+          - nfs-kernel-server
+          - nfs-common
+        state: present
+
+    - name: Create export directories with proper permissions
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+        owner: nobody
+        group: nogroup
+      loop:
+        - /data/evidence
+        - /data/processed
+        - /data/cases
+
+    - name: Configure NFS exports
+      copy:
+        content: |
+          # Updated NFS exports for corrected VM IP mappings
+          /data/evidence 34.136.254.74(rw,sync,no_subtree_check,no_root_squash) 34.173.123.123(rw,sync,no_subtree_check,no_root_squash) 34.123.164.154(rw,sync,no_subtree_check,no_root_squash)
+          /data/processed 34.136.254.74(rw,sync,no_subtree_check,no_root_squash) 34.173.123.123(rw,sync,no_subtree_check,no_root_squash) 34.123.164.154(rw,sync,no_subtree_check,no_root_squash)
+          /data/cases 34.136.254.74(rw,sync,no_subtree_check,no_root_squash) 34.173.123.123(rw,sync,no_subtree_check,no_root_squash) 34.123.164.154(rw,sync,no_subtree_check,no_root_squash)
+        dest: /etc/exports
+
+    - name: Start and enable NFS services
+      systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - nfs-kernel-server
+        - rpcbind
+
+    - name: Export NFS shares
+      command: exportfs -ra
+
+- name: Mount NFS Shares on Other Servers
+  hosts: management:data_services
+  become: yes
+  tasks:
+    - name: Create mount points
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /data/evidence
+        - /data/processed
+        - /data/cases
+
+    - name: Mount NFS shares
+      mount:
+        path: "{{ item.mount }}"
+        src: "{{ nfs_server }}:{{ item.src }}"
+        fstype: nfs
+        opts: defaults,rw
+        state: mounted
+      loop:
+        - { src: "/data/evidence", mount: "/data/evidence" }
+        - { src: "/data/processed", mount: "/data/processed" }
+        - { src: "/data/cases", mount: "/data/cases" }

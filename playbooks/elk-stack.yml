@@ -1,0 +1,263 @@
+---
+- name: Deploy ELK Stack on Data Services Server
+  hosts: data_services
+  become: yes
+  vars:
+    elasticsearch_version: "8.11.0"
+    elasticsearch_heap_size: "1g"
+  tasks:
+    - name: Create ELK directory structure
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+      loop:
+        - /opt/elk
+        - /opt/elk/elasticsearch/data
+        - /opt/elk/elasticsearch/logs
+        - /opt/elk/elasticsearch/config
+        - /opt/elk/logstash/config
+        - /opt/elk/logstash/pipeline
+        - /opt/elk/kibana/config
+
+    - name: Create Elasticsearch configuration
+      copy:
+        content: |
+          cluster.name: forensics-cluster
+          node.name: forensics-node-1
+          path.data: /usr/share/elasticsearch/data
+          path.logs: /usr/share/elasticsearch/logs
+          network.host: 0.0.0.0
+          http.port: 9200
+          discovery.type: single-node
+          xpack.security.enabled: false
+          xpack.security.http.ssl.enabled: false
+          xpack.security.transport.ssl.enabled: false
+        dest: /opt/elk/elasticsearch/config/elasticsearch.yml
+
+    - name: Create Logstash configuration
+      copy:
+        content: |
+          path.data: /usr/share/logstash/data
+          pipeline.workers: 4
+          pipeline.batch.size: 125
+          pipeline.batch.delay: 50
+          path.config: /usr/share/logstash/pipeline
+          path.logs: /usr/share/logstash/logs
+          xpack.monitoring.enabled: false
+        dest: /opt/elk/logstash/config/logstash.yml
+
+    - name: Create Logstash pipeline configuration
+      copy:
+        content: |
+          input {
+            file {
+              path => "/data/processed/autopsy/*.json"
+              start_position => "beginning"
+              sincedb_path => "/dev/null"
+              codec => "json"
+              type => "autopsy"
+              tags => ["forensics", "autopsy"]
+            }
+            file {
+              path => "/data/processed/volatility/*.json"
+              start_position => "beginning"
+              sincedb_path => "/dev/null"
+              codec => "json"
+              type => "volatility"
+              tags => ["forensics", "memory"]
+            }
+            file {
+              path => "/data/processed/andriller/*.json"
+              start_position => "beginning"
+              sincedb_path => "/dev/null"
+              codec => "json"
+              type => "andriller"
+              tags => ["forensics", "mobile"]
+            }
+            file {
+              path => "/data/processed/cape/*.json"
+              start_position => "beginning"
+              sincedb_path => "/dev/null"
+              codec => "json"
+              type => "cape"
+              tags => ["forensics", "malware"]
+            }
+            beats {
+              port => 5044
+            }
+          }
+
+          filter {
+            # Add timestamp processing
+            if ![timestamp] and [@timestamp] {
+              mutate { add_field => { "timestamp" => "%{@timestamp}" } }
+            }
+
+            # Parse Autopsy data
+            if [type] == "autopsy" {
+              if [timestamp] {
+                date {
+                  match => [ "timestamp", "yyyy-MM-dd HH:mm:ss", "ISO8601" ]
+                  target => "@timestamp"
+                }
+              }
+              
+              if [file_path] {
+                grok {
+                  match => { "file_path" => "(?<file_directory>.*)/(?<file_name>[^/]+)$" }
+                }
+                
+                grok {
+                  match => { "file_name" => ".*\.(?<file_extension>[^.]+)$" }
+                }
+              }
+            }
+
+            # Parse Volatility data
+            if [type] == "volatility" {
+              if [process_name] and [pid] {
+                mutate {
+                  add_field => { "process_key" => "%{process_name}-%{pid}" }
+                }
+              }
+            }
+
+            # Parse mobile data
+            if [type] == "andriller" {
+              if [app_name] {
+                mutate {
+                  add_field => { "device_type" => "mobile" }
+                }
+              }
+            }
+
+            # Parse malware analysis
+            if [type] == "cape" {
+              if [malware_family] {
+                mutate {
+                  add_field => { "threat_type" => "malware" }
+                }
+              }
+            }
+
+            # Add case metadata
+            if [case_id] {
+              mutate {
+                add_field => { "lab_processed" => true }
+                add_field => { "processing_time" => "%{@timestamp}" }
+              }
+            }
+          }
+
+          output {
+            elasticsearch {
+              hosts => ["localhost:9200"]
+              index => "forensics-%{type}-%{+YYYY.MM.dd}"
+              template_name => "forensics"
+              template_pattern => "forensics-*"
+              template => {
+                "settings" => {
+                  "number_of_shards" => 1,
+                  "number_of_replicas" => 0,
+                  "index.mapping.total_fields.limit" => 10000
+                },
+                "mappings" => {
+                  "properties" => {
+                    "@timestamp" => { "type" => "date" },
+                    "case_id" => { "type" => "keyword" },
+                    "evidence_id" => { "type" => "keyword" },
+                    "file_path" => { "type" => "text", "analyzer" => "standard" },
+                    "file_hash" => { "type" => "keyword" },
+                    "process_name" => { "type" => "keyword" },
+                    "ip_address" => { "type" => "ip" },
+                    "url" => { "type" => "text" },
+                    "malware_family" => { "type" => "keyword" },
+                    "ioc_match" => { "type" => "boolean" },
+                    "threat_score" => { "type" => "integer" }
+                  }
+                }
+              }
+            }
+            
+            stdout {
+              codec => rubydebug
+            }
+          }
+        dest: /opt/elk/logstash/pipeline/forensics.conf
+
+    - name: Create Docker Compose for ELK Stack
+      copy:
+        content: |
+          version: '3.8'
+          services:
+            elasticsearch:
+              image: docker.elastic.co/elasticsearch/elasticsearch:{{ elasticsearch_version }}
+              container_name: elasticsearch
+              environment:
+                - discovery.type=single-node
+                - "ES_JAVA_OPTS=-Xms{{ elasticsearch_heap_size }} -Xmx{{ elasticsearch_heap_size }}"
+                - xpack.security.enabled=false
+                - xpack.security.http.ssl.enabled=false
+                - xpack.security.transport.ssl.enabled=false
+                - cluster.name=forensics-cluster
+                - node.name=forensics-node-1
+              ports:
+                - "9200:9200"
+                - "9300:9300"
+              volumes:
+                - ./elasticsearch/data:/usr/share/elasticsearch/data
+                - ./elasticsearch/logs:/usr/share/elasticsearch/logs
+                - ./elasticsearch/config/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml
+              restart: unless-stopped
+              ulimits:
+                memlock:
+                  soft: -1
+                  hard: -1
+
+            logstash:
+              image: docker.elastic.co/logstash/logstash:{{ elasticsearch_version }}
+              container_name: logstash
+              volumes:
+                - ./logstash/config/logstash.yml:/usr/share/logstash/config/logstash.yml
+                - ./logstash/pipeline:/usr/share/logstash/pipeline
+                - /data:/data:ro
+              ports:
+                - "5044:5044"
+                - "5000:5000/tcp"
+                - "5000:5000/udp"
+                - "9600:9600"
+              environment:
+                LS_JAVA_OPTS: "-Xmx1g -Xms1g"
+              depends_on:
+                - elasticsearch
+              restart: unless-stopped
+
+            kibana:
+              image: docker.elastic.co/kibana/kibana:{{ elasticsearch_version }}
+              container_name: kibana
+              ports:
+                - "5601:5601"
+              environment:
+                ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+                SERVER_NAME: forensics-kibana
+                SERVER_HOST: 0.0.0.0
+              depends_on:
+                - elasticsearch
+              restart: unless-stopped
+
+          volumes:
+            elasticsearch_data:
+            logstash_data:
+        dest: /opt/elk/docker-compose.yml
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+
+    - name: Set proper ownership for ELK directories
+      file:
+        path: /opt/elk
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        recurse: yes

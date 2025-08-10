@@ -85,6 +85,13 @@ locals {
     done
     echo "Cloud-init completed"
 
+    # Ensure olusecc user exists and has sudo access
+    if ! id olusecc >/dev/null 2>&1; then
+      useradd -m -s /bin/bash olusecc
+      usermod -aG sudo olusecc
+      echo "olusecc ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/olusecc
+    fi
+
     # Ensure users exist (in case guest agent hasn't created them yet)
     for U in $USERS; do
       echo "Checking user: $U"

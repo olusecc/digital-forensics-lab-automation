@@ -1,0 +1,69 @@
+---
+- name: Base System Setup for All Servers
+  hosts: all
+  become: yes
+  tasks:
+    - name: Update system packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+        cache_valid_time: 3600
+
+    - name: Install base packages
+      apt:
+        name:
+          - curl
+          - wget
+          - git
+          - vim
+          - htop
+          - unzip
+          - docker.io
+          - docker-compose
+          - python3-pip
+          - nfs-common
+          - jq
+          - net-tools
+        state: present
+
+    - name: Start and enable Docker
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Add user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+    - name: Create shared directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+      loop:
+        - /opt/scripts
+        - /opt/configs
+        - /data
+        - /data/evidence
+        - /data/processed
+        - /data/cases
+        - /var/log/forensics
+
+    - name: Set up log rotation
+      copy:
+        content: |
+          /var/log/forensics/*.log {
+            daily
+            rotate 30
+            compress
+            delaycompress
+            missingok
+            notifempty
+            create 644 root root
+          }
+        dest: /etc/logrotate.d/forensics-lab
