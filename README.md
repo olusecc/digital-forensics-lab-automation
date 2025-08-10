@@ -47,6 +47,13 @@ This Terraform configuration creates a complete digital forensics lab environmen
    terraform apply -auto-approve
    ```
 
+4. **Set up SSH config for easy access** (including VS Code):
+   ```bash
+   ./setup_ssh_config.sh
+   ```
+
+5. **For VS Code Remote SSH setup**, see: [`VS_CODE_SETUP.md`](./VS_CODE_SETUP.md)
+
 ## VM-to-VM Communication
 
 The infrastructure includes automatic setup for seamless VM-to-VM SSH communication:
@@ -68,18 +75,28 @@ The infrastructure includes automatic setup for seamless VM-to-VM SSH communicat
    terraform output ssh_commands
    
    # Connect (example)
-   ssh -i ~/.ssh/gcp_olusec formgt@<external-ip>
+   ssh -i ~/.ssh/gcp_olusec formgt@34.136.254.74
    ```
 
 2. **VM-to-VM SSH (from inside any VM)**:
    ```bash
-   # These commands work from any VM to any other VM
+   # ✅ CORRECT: Use full internal hostnames
    ssh fortools@fortools.lab.internal
    ssh formie@formie.lab.internal
    ssh formgt@formgt.lab.internal
+   
+   # ❌ WRONG: These hostnames don't exist
+   ssh vm1  # This won't work
+   ssh vm2  # This won't work
+   ssh vm3  # This won't work
    ```
 
-3. **Verify the setup**:
+3. **Important hostname mapping**:
+   - `vm-formgt` ➜ `formgt.lab.internal`
+   - `vm-fortools` ➜ `fortools.lab.internal` 
+   - `vm-formie` ➜ `formie.lab.internal`
+
+4. **Verify the setup**:
    ```bash
    # Check cluster key exists
    ls -la ~/.ssh/cluster_key
