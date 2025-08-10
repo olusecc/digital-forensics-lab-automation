@@ -63,43 +63,103 @@ locals {
     "${var.user_formie}:${trimspace(tls_private_key.cluster.public_key_openssh)}",
   ])
 
-  # One startup script reused by all VMs (escape shell ${} with $$)
+  # Startup script:
+  # - ensures users exist
+  # - installs cluster private key into each user's ~/.ssh/cluster_key
+  # - preps known_hosts placeholders for internal names
   startup_script = <<-EOT
     #!/usr/bin/env bash
-    set -eu
+    set -e  # Remove -u to avoid issues with unset variables
+    
+    # Enable logging for debugging
+    exec > >(logger -t startup-script) 2>&1
+    echo "Starting cluster setup script..."
 
     USERS="${var.user_formgt} ${var.user_fortools} ${var.user_formie}"
+    echo "Users to configure: $USERS"
 
-    # Cluster private key (from Terraform)
-    read -r -d '' PRIV_KEY <<'EOF'
-${tls_private_key.cluster.private_key_openssh}
-EOF
+    # Wait for cloud-init to finish creating users
+    echo "Waiting for cloud-init to complete..."
+    while [ ! -f /var/lib/cloud/instance/boot-finished ]; do
+      sleep 2
+    done
+    echo "Cloud-init completed"
 
-    for U in $${USERS}; do
-      HOME_DIR="/home/$${U}"
-      SSH_DIR="$${HOME_DIR}/.ssh"
-      install -d -m 700 -o "$${U}" -g "$${U}" "$${SSH_DIR}"
-
-      # Write cluster key
-      umask 177
-      echo "$${PRIV_KEY}" > "$${SSH_DIR}/cluster_key"
-      chown "$${U}:$${U}" "$${SSH_DIR}/cluster_key"
-      chmod 600 "$${SSH_DIR}/cluster_key"
-
-      # Prime known_hosts (placeholders; real keys learned on first connect)
-      KH="$${SSH_DIR}/known_hosts"
-      touch "$${KH}"
-      chown "$${U}:$${U}" "$${KH}"
-      chmod 644 "$${KH}"
-
-      for H in formgt.lab.internal fortools.lab.internal formie.lab.internal; do
-        if ! ssh-keygen -F "$${H}" -f "$${KH}" >/dev/null 2>&1; then
-          echo "# $${H} placeholder — will be learned on first connection" >> "$${KH}"
-        fi
-      done
+    # Ensure users exist (in case guest agent hasn't created them yet)
+    for U in $USERS; do
+      echo "Checking user: $U"
+      if ! id -u "$U" >/dev/null 2>&1; then
+        echo "Creating user: $U"
+        useradd -m -s /bin/bash "$U"
+        usermod -aG google-sudoers "$U" 2>/dev/null || echo "google-sudoers group not found, skipping"
+      else
+        echo "User $U already exists"
+      fi
     done
 
-    logger -t startup-script "Cluster key installed at ~/.ssh/cluster_key for users: $${USERS}"
+    # Create cluster private key content (avoiding read -d issues)
+    cat > /tmp/cluster_key <<'EOF'
+${tls_private_key.cluster.private_key_openssh}
+EOF
+    
+    echo "Created temporary cluster key file"
+    chmod 600 /tmp/cluster_key
+
+    for U in $USERS; do
+      echo "Configuring SSH for user: $U"
+      HOME_DIR="/home/$U"
+      SSH_DIR="$HOME_DIR/.ssh"
+      
+      # Ensure home directory exists
+      if [ ! -d "$HOME_DIR" ]; then
+        echo "Creating home directory for $U"
+        mkdir -p "$HOME_DIR"
+        chown "$U:$U" "$HOME_DIR"
+        chmod 755 "$HOME_DIR"
+      fi
+      
+      # Create SSH directory
+      echo "Creating SSH directory for $U"
+      mkdir -p "$SSH_DIR"
+      chmod 700 "$SSH_DIR"
+      chown "$U:$U" "$SSH_DIR"
+
+      # Install cluster key
+      echo "Installing cluster key for $U"
+      cp /tmp/cluster_key "$SSH_DIR/cluster_key"
+      chown "$U:$U" "$SSH_DIR/cluster_key"
+      chmod 600 "$SSH_DIR/cluster_key"
+
+      # Create SSH config for easier connections
+      cat > "$SSH_DIR/config" <<SSHEOF
+Host *.lab.internal
+    User $U
+    IdentityFile ~/.ssh/cluster_key
+    StrictHostKeyChecking no
+    UserKnownHostsFile ~/.ssh/known_hosts
+SSHEOF
+      chown "$U:$U" "$SSH_DIR/config"
+      chmod 644 "$SSH_DIR/config"
+
+      # Prime known_hosts
+      echo "Setting up known_hosts for $U"
+      KH="$SSH_DIR/known_hosts"
+      touch "$KH"
+      chown "$U:$U" "$KH"
+      chmod 644 "$KH"
+
+      for H in formgt.lab.internal fortools.lab.internal formie.lab.internal; do
+        if ! grep -q "$H" "$KH" 2>/dev/null; then
+          echo "# $H placeholder — will be learned on first connection" >> "$KH"
+        fi
+      done
+      
+      echo "Completed SSH setup for user: $U"
+    done
+
+    # Clean up temporary file
+    rm -f /tmp/cluster_key
+    echo "Cluster key setup completed successfully for users: $USERS"
   EOT
 }
 
@@ -197,6 +257,15 @@ resource "google_compute_instance" "vm3" {
 }
 
 # -----------------------------
+# Enable required APIs
+# -----------------------------
+resource "google_project_service" "dns" {
+  service = "dns.googleapis.com"
+
+  disable_dependent_services = true
+}
+
+# -----------------------------
 # Private Cloud DNS zone + records
 # -----------------------------
 resource "google_dns_managed_zone" "lab_internal" {
@@ -210,6 +279,8 @@ resource "google_dns_managed_zone" "lab_internal" {
       network_url = google_compute_network.vpc.self_link
     }
   }
+
+  depends_on = [google_project_service.dns]
 }
 
 resource "google_dns_record_set" "a_formgt" {
