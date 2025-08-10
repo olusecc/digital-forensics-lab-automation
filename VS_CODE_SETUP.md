@@ -10,11 +10,15 @@
 
 ## Quick Setup
 
+✅ **SSH is now fully configured and working!**
+
 Your SSH config has been automatically configured. You can now connect using these host aliases:
 
-- `formgt-lab` - Connect to formgt VM
-- `fortools-lab` - Connect to fortools VM  
-- `formie-lab` - Connect to formie VM
+- `formgt-lab` - Connect to formgt VM (34.136.254.74)
+- `fortools-lab` - Connect to fortools VM (34.173.123.123)
+- `formie-lab` - Connect to formie VM (34.123.164.154)
+
+**Test connection**: `ssh formgt-lab` should work immediately!
 
 ## VS Code Connection Steps
 
