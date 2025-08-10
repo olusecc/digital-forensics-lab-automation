@@ -1,0 +1,40 @@
+all:
+  children:
+    management:
+      hosts:
+        mgmt-jenkins:
+          # Updated IP for formgt VM
+          ansible_host: 34.136.254.74
+    forensics:
+      hosts:
+        forensics-server:
+          # Updated IP for fortools VM
+          ansible_host: 34.123.164.154
+    data_services:
+      hosts:
+        elk-misp-iris:
+          # Updated IP for formie VM
+          ansible_host: 34.173.123.123
+  vars:
+    ansible_user: olusecc
+    # Updated to use cluster_key instead of forensics-lab-key for VM communication
+    ansible_ssh_private_key_file: ~/.ssh/cluster_key
+    ansible_python_interpreter: /usr/bin/python3
+    ansible_become: yes
+    ansible_become_method: sudo
+    # Service endpoints - Updated to use new VM IPs
+    elasticsearch_host: 34.173.123.123
+    elasticsearch_port: 9200
+    kibana_host: 34.173.123.123
+    kibana_port: 5601
+    jenkins_host: 34.136.254.74
+    jenkins_port: 8080
+    misp_host: 34.173.123.123
+    misp_port: 80
+    iris_host: 34.173.123.123
+    iris_port: 8000
+    # Shared storage - Updated to use new forensics server IP
+    nfs_server: 34.123.164.154
+    evidence_path: /data/evidence
+    processed_path: /data/processed
+    cases_path: /data/cases

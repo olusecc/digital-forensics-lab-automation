@@ -1,0 +1,17 @@
+---
+- name: Create forensics processing directories
+  hosts: forensics
+  become: yes
+  tasks:
+    - name: Create processed data directories
+      file:
+        path: "/data/processed/{{ item }}"
+        state: directory
+        mode: '0755'
+        owner: forensics
+        group: forensics
+      loop:
+        - autopsy
+        - volatility
+        - andriller
+        - cape
