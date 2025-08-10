@@ -25,10 +25,10 @@
     - name: Configure NFS exports
       copy:
         content: |
-          # Updated NFS exports for new VM IPs - replaced 192.168.56.0/24 with specific IPs
-          /data/evidence 34.136.254.74(rw,sync,no_subtree_check,no_root_squash) 34.123.164.154(rw,sync,no_subtree_check,no_root_squash) 34.173.123.123(rw,sync,no_subtree_check,no_root_squash)
-          /data/processed 34.136.254.74(rw,sync,no_subtree_check,no_root_squash) 34.123.164.154(rw,sync,no_subtree_check,no_root_squash) 34.173.123.123(rw,sync,no_subtree_check,no_root_squash)
-          /data/cases 34.136.254.74(rw,sync,no_subtree_check,no_root_squash) 34.123.164.154(rw,sync,no_subtree_check,no_root_squash) 34.173.123.123(rw,sync,no_subtree_check,no_root_squash)
+          # Updated NFS exports for corrected VM IP mappings
+          /data/evidence 34.136.254.74(rw,sync,no_subtree_check,no_root_squash) 34.173.123.123(rw,sync,no_subtree_check,no_root_squash) 34.123.164.154(rw,sync,no_subtree_check,no_root_squash)
+          /data/processed 34.136.254.74(rw,sync,no_subtree_check,no_root_squash) 34.173.123.123(rw,sync,no_subtree_check,no_root_squash) 34.123.164.154(rw,sync,no_subtree_check,no_root_squash)
+          /data/cases 34.136.254.74(rw,sync,no_subtree_check,no_root_squash) 34.173.123.123(rw,sync,no_subtree_check,no_root_squash) 34.123.164.154(rw,sync,no_subtree_check,no_root_squash)
         dest: /etc/exports
 
     - name: Start and enable NFS services

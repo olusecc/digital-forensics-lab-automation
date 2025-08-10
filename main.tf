@@ -20,6 +20,7 @@ resource "google_compute_firewall" "allow_ssh" {
     ports    = ["22"]
   }
 
+  # Updated to allow SSH from original IP + inter-VM communication
   source_ranges = var.ssh_source_ranges
   target_tags   = ["ssh"]
 }
@@ -70,6 +71,13 @@ locals {
 
     USERS="${var.user_formgt} ${var.user_fortools} ${var.user_formie}"
 
+    # Ensure olusecc user exists and has sudo access
+    if ! id olusecc >/dev/null 2>&1; then
+      useradd -m -s /bin/bash olusecc
+      usermod -aG sudo olusecc
+      echo "olusecc ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/olusecc
+    fi
+
     # Cluster private key (from Terraform)
     read -r -d '' PRIV_KEY <<'EOF'
 ${tls_private_key.cluster.private_key_openssh}
@@ -78,6 +86,14 @@ EOF
     for U in $${USERS}; do
       HOME_DIR="/home/$${U}"
       SSH_DIR="$${HOME_DIR}/.ssh"
+      
+      # Create user if it doesn't exist
+      if ! id "$${U}" >/dev/null 2>&1; then
+        useradd -m -s /bin/bash "$${U}"
+        usermod -aG sudo "$${U}"
+        echo "$${U} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$${U}"
+      fi
+      
       install -d -m 700 -o "$${U}" -g "$${U}" "$${SSH_DIR}"
 
       # Write cluster key

@@ -35,15 +35,15 @@ variable "ssh_source_ranges" {
 
 variable "user_formgt" {
   type    = string
-  default = "formgt"
+  default = "olusecc"  # Updated to match Ansible inventory user
 }
 
 variable "user_fortools" {
   type    = string
-  default = "fortools"
+  default = "olusecc"  # Updated to match Ansible inventory user
 }
 
 variable "user_formie" {
   type    = string
-  default = "formie"
+  default = "olusecc"  # Updated to match Ansible inventory user
 }
