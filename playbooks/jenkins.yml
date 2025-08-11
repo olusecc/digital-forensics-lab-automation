@@ -10,12 +10,7 @@
       apt:
         name: openjdk-21-jdk
         state: present
-
-    - name: Remove Java 11 if present
-      apt:
-        name: openjdk-11-jdk
-        state: absent
-
+  
     - name: Add Jenkins repository key
       apt_key:
         url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
