@@ -98,9 +98,21 @@ locals {
       if ! id -u "$U" >/dev/null 2>&1; then
         echo "Creating user: $U"
         useradd -m -s /bin/bash "$U"
+        # Add to both sudo groups for compatibility
+        usermod -aG sudo "$U"
         usermod -aG google-sudoers "$U" 2>/dev/null || echo "google-sudoers group not found, skipping"
+        # Ensure passwordless sudo access
+        echo "$U ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$U"
+        chmod 440 "/etc/sudoers.d/$U"
+        echo "User $U created successfully with sudo access"
       else
         echo "User $U already exists"
+        # Ensure existing users have sudo access
+        usermod -aG sudo "$U" 2>/dev/null || echo "Failed to add $U to sudo group"
+        usermod -aG google-sudoers "$U" 2>/dev/null || echo "google-sudoers group not found"
+        echo "$U ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$U"
+        chmod 440 "/etc/sudoers.d/$U"
+        echo "Updated sudo access for existing user $U"
       fi
     done
 

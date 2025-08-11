@@ -25,7 +25,7 @@ This Terraform configuration creates a complete digital forensics lab environmen
    ```bash
    # Install required tools
    sudo apt update
-   sudo apt install terraform google-cloud-sdk
+   sudo apt install terraform google-cloud-sdk jq
 
    # Authenticate with Google Cloud
    gcloud auth login
@@ -47,7 +47,100 @@ This Terraform configuration creates a complete digital forensics lab environmen
    terraform apply -auto-approve
    ```
 
-4. **Set up SSH config for easy access** (including VS Code):
+4. **Automated post-deployment setup**:
+   ```bash
+   # Run the complete setup sequence
+   ./create_users.sh      # Create forensics users with proper permissions
+   ./fix_ssh_keys.sh      # Configure SSH keys for all users
+   ./setup_ssh_config.sh  # Set up local SSH client config
+   ```
+
+5. **Verify lab health**:
+   ```bash
+   ./health_check.sh      # Comprehensive lab status check
+   ```
+
+## 🔧 Automation & Maintenance
+
+### Daily Operations Scripts
+
+- **`health_check.sh`** - Complete lab health verification
+  - VM status and connectivity
+  - User configuration verification
+  - DNS resolution testing
+  - Overall lab health summary
+
+- **`update_config.sh`** - Handle IP changes after VM restarts
+  - Automatically detects new VM IP addresses
+  - Updates terraform.tfvars with current IPs
+  - Refreshes SSH configurations
+  - Updates firewall rules
+  - Tests connectivity
+
+- **`create_users.sh`** - Ensure forensics users exist with proper permissions
+  - Creates formgt, fortools, formie users on all VMs
+  - Configures sudo access and groups
+  - Runs SSH key setup automatically
+
+- **`fix_ssh_keys.sh`** - Comprehensive SSH key deployment
+  - Sets up both personal and cluster SSH keys
+  - Configures authorized_keys for all users
+  - Tests all connections
+
+- **`setup_ssh_config.sh`** - Local SSH client configuration
+  - Creates convenient aliases (formgt-lab, fortools-lab, formie-lab)
+  - Configures VS Code Remote SSH compatibility
+
+### Handling Common Issues
+
+#### VM IP Address Changes (After Restarts)
+```bash
+# Automatic fix - handles everything
+./update_config.sh
+
+# Manual steps if needed:
+terraform output vm_ips                    # Check current IPs
+./setup_ssh_config.sh                     # Update SSH config
+ssh-keygen -R <old-ip>                     # Remove old host keys
+```
+
+#### SSH Connection Failures
+```bash
+# Step-by-step troubleshooting
+./health_check.sh                          # Identify issues
+./create_users.sh                          # Ensure users exist
+./fix_ssh_keys.sh                          # Fix SSH keys
+./update_config.sh                         # Update all configs
+```
+
+#### User Permission Issues
+```bash
+# Recreate users with proper permissions
+./create_users.sh
+
+# Manual user creation if needed:
+gcloud compute ssh vm-formgt --command="sudo useradd -m -s /bin/bash formgt"
+gcloud compute ssh vm-formgt --command="sudo usermod -aG sudo formgt"
+```
+
+### Monitoring & Health Checks
+
+Run periodic health checks to ensure lab stability:
+
+```bash
+# Quick status check
+./health_check.sh
+
+# Detailed infrastructure status
+gcloud compute instances list --filter='name~vm-.*'
+terraform output vm_ips
+terraform output ssh_commands
+
+# Test all connections
+for alias in formgt-lab fortools-lab formie-lab; do
+    ssh $alias "echo 'Connection to $alias: OK'"
+done
+```
    ```bash
    ./setup_ssh_config.sh
    ```
