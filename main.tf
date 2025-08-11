@@ -129,10 +129,15 @@ EOF
       HOME_DIR="/home/$U"
       SSH_DIR="$HOME_DIR/.ssh"
       
-      # Ensure home directory exists
+      # Ensure home directory exists with proper permissions
       if [ ! -d "$HOME_DIR" ]; then
         echo "Creating home directory for $U"
         mkdir -p "$HOME_DIR"
+        chown "$U:$U" "$HOME_DIR"
+        chmod 755 "$HOME_DIR"
+      else
+        # Fix permissions for existing home directory
+        echo "Fixing permissions for existing home directory: $HOME_DIR"
         chown "$U:$U" "$HOME_DIR"
         chmod 755 "$HOME_DIR"
       fi
@@ -173,7 +178,35 @@ SSHEOF
         fi
       done
       
-      echo "Completed SSH setup for user: $U"
+      # Create VS Code server directory with proper permissions (prevents connection issues)
+      echo "Setting up VS Code directories for $U"
+      VSCODE_DIR="$HOME_DIR/.vscode-server"
+      mkdir -p "$VSCODE_DIR"
+      chown "$U:$U" "$VSCODE_DIR"
+      chmod 755 "$VSCODE_DIR"
+      
+      # Ensure shell profile exists for VS Code environment
+      PROFILE="$HOME_DIR/.bashrc"
+      if [ ! -f "$PROFILE" ]; then
+        cp /etc/skel/.bashrc "$PROFILE" 2>/dev/null || touch "$PROFILE"
+        chown "$U:$U" "$PROFILE"
+        chmod 644 "$PROFILE"
+      fi
+      
+      # Add VS Code PATH and environment setup
+      cat >> "$PROFILE" <<ENVEOF
+
+# VS Code Remote SSH environment setup
+export PATH=\$PATH:\$HOME/.vscode-server/bin/*/bin
+export TERM=xterm-256color
+
+# Forensics lab environment
+export LAB_USER=\$U
+export LAB_HOME=\$HOME
+ENVEOF
+      chown "$U:$U" "$PROFILE"
+      
+      echo "Completed SSH and VS Code setup for user: $U"
     done
 
     # Clean up temporary file

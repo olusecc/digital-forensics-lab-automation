@@ -10,15 +10,15 @@
 
 ## Quick Setup
 
-✅ **SSH is now fully configured and working!**
+✅ **SSH configuration has been cleaned and optimized for VS Code!**
 
-Your SSH config has been automatically configured. You can now connect using these host aliases:
+Your SSH config has been automatically configured and tested. Current VM connections:
 
-- `formgt-lab` - Connect to formgt VM (34.136.254.74)
-- `fortools-lab` - Connect to fortools VM (34.173.123.123)
-- `formie-lab` - Connect to formie VM (34.123.164.154)
+- `formgt-lab` - Connect to formgt VM (34.136.254.74) ✅ Working
+- `fortools-lab` - Connect to fortools VM (34.172.7.74) ✅ Working  
+- `formie-lab` - Connect to formie VM (34.123.164.154) ✅ Working
 
-**Test connection**: `ssh formgt-lab` should work immediately!
+**All connections tested and verified!**
 
 ## VS Code Connection Steps
 
