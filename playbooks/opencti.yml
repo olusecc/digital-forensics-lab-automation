@@ -1,0 +1,135 @@
+---
+- name: Deploy OpenCTI Threat Intelligence Platform (Alternative to MISP)
+  hosts: data_services
+  become: yes
+  tasks:
+    - name: Create OpenCTI directory structure
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /opt/opencti
+        - /opt/opencti/data
+
+    - name: Create OpenCTI Docker Compose configuration
+      copy:
+        content: |
+          version: '3.8'
+          services:
+            redis:
+              image: redis:7-alpine
+              container_name: opencti-redis
+              restart: unless-stopped
+              volumes:
+                - redis_data:/data
+
+            elasticsearch:
+              image: docker.elastic.co/elasticsearch/elasticsearch:8.8.0
+              container_name: opencti-elasticsearch
+              restart: unless-stopped
+              environment:
+                - discovery.type=single-node
+                - xpack.security.enabled=false
+                - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+              volumes:
+                - esdata:/usr/share/elasticsearch/data
+              ulimits:
+                memlock:
+                  soft: -1
+                  hard: -1
+                nofile:
+                  soft: 65536
+                  hard: 65536
+
+            minio:
+              image: minio/minio:latest
+              container_name: opencti-minio
+              restart: unless-stopped
+              ports:
+                - "9000:9000"
+                - "9001:9001"
+              environment:
+                MINIO_ROOT_USER: opencti
+                MINIO_ROOT_PASSWORD: opencti_password
+              command: server /data --console-address ":9001"
+              volumes:
+                - s3_data:/data
+
+            rabbitmq:
+              image: rabbitmq:3.12-management
+              container_name: opencti-rabbitmq
+              restart: unless-stopped
+              environment:
+                RABBITMQ_DEFAULT_USER: opencti
+                RABBITMQ_DEFAULT_PASS: opencti_password
+              volumes:
+                - amqpdata:/var/lib/rabbitmq
+
+            opencti:
+              image: opencti/platform:5.12.17
+              container_name: opencti-platform
+              restart: unless-stopped
+              depends_on:
+                - redis
+                - elasticsearch
+                - minio
+                - rabbitmq
+              ports:
+                - "8080:8080"
+              environment:
+                - NODE_OPTIONS=--max-old-space-size=8096
+                - APP__PORT=8080
+                - APP__BASE_URL=http://10.128.0.19:8080
+                - APP__ADMIN__EMAIL=admin@forensicslab.local
+                - APP__ADMIN__PASSWORD=ForensicsAdmin2024!
+                - APP__ADMIN__TOKEN=ChangeThis-OpenCTI-Token-12345
+                - APP__APP_LOGS__LOGS_LEVEL=info
+                - REDIS__HOSTNAME=redis
+                - REDIS__PORT=6379
+                - ELASTICSEARCH__URL=http://elasticsearch:9200
+                - MINIO__ENDPOINT=minio
+                - MINIO__PORT=9000
+                - MINIO__USE_SSL=false
+                - MINIO__ACCESS_KEY=opencti
+                - MINIO__SECRET_KEY=opencti_password
+                - RABBITMQ__HOSTNAME=rabbitmq
+                - RABBITMQ__PORT=5672
+                - RABBITMQ__PORT_MANAGEMENT=15672
+                - RABBITMQ__MANAGEMENT_SSL=false
+                - RABBITMQ__USERNAME=opencti
+                - RABBITMQ__PASSWORD=opencti_password
+                - SMTP__HOSTNAME=localhost
+                - SMTP__PORT=25
+                - PROVIDERS__LOCAL__STRATEGY=LocalStrategy
+
+          volumes:
+            esdata:
+            s3_data:
+            redis_data:
+            amqpdata:
+        dest: /opt/opencti/docker-compose.yml
+
+    - name: Start OpenCTI services
+      command: docker-compose up -d
+      args:
+        chdir: /opt/opencti
+
+    - name: Wait for OpenCTI to be ready
+      wait_for:
+        host: localhost
+        port: 8080
+        delay: 120
+        timeout: 900
+
+    - name: Display OpenCTI access information
+      debug:
+        msg: |
+          OpenCTI is now accessible at: http://10.128.0.19:8080
+          
+          Default credentials:
+          Email: admin@forensicslab.local
+          Password: ForensicsAdmin2024!
+          API Token: ChangeThis-OpenCTI-Token-12345
+          
+          Please change the default credentials after first login.

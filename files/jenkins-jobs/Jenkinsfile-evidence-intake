@@ -30,7 +30,7 @@ pipeline {
     }
     
     environment {
-        FORENSICS_SERVER = '192.168.1.11'
+        FORENSICS_SERVER = '10.128.0.18'
     }
     
     stages {
@@ -53,7 +53,7 @@ pipeline {
                     def actualCaseId = params.CASE_ID ?: env.CASE_ID
                     
                     sh """
-                        ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                        ssh -i ~/.ssh/cluster_key olusecc@${env.FORENSICS_SERVER} '
                             mkdir -p /data/cases/${actualCaseId}/{intake,evidence,analysis,reports}
                             echo "Case created: ${actualCaseId}" > /data/cases/${actualCaseId}/case_info.txt
                             echo "Created by: ${params.INVESTIGATOR}" >> /data/cases/${actualCaseId}/case_info.txt
@@ -73,7 +73,7 @@ pipeline {
                     
                     // Copy evidence with verification
                     sh """
-                        ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                        ssh -i ~/.ssh/cluster_key olusecc@${env.FORENSICS_SERVER} '
                             if [ -f "${params.SOURCE_PATH}" ]; then
                                 cp "${params.SOURCE_PATH}" /data/cases/${actualCaseId}/intake/
                                 sha256sum "${params.SOURCE_PATH}" > /data/cases/${actualCaseId}/intake/original_hash.txt
@@ -96,7 +96,7 @@ pipeline {
                     def timestamp = new Date().format('yyyy-MM-dd HH:mm:ss')
                     
                     sh """
-                        ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                        ssh -i ~/.ssh/cluster_key olusecc@${env.FORENSICS_SERVER} '
                             cat > /data/cases/${actualCaseId}/chain_of_custody.txt << EOL
 CHAIN OF CUSTODY LOG
 Case ID: ${actualCaseId}

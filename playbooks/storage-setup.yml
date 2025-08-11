@@ -26,9 +26,9 @@
       copy:
         content: |
           # Updated NFS exports for internal VM IPs for better performance
-          /data/evidence 10.128.0.15(rw,sync,no_subtree_check,no_root_squash) 10.128.0.16(rw,sync,no_subtree_check,no_root_squash) 10.128.0.17(rw,sync,no_subtree_check,no_root_squash)
-          /data/processed 10.128.0.15(rw,sync,no_subtree_check,no_root_squash) 10.128.0.16(rw,sync,no_subtree_check,no_root_squash) 10.128.0.17(rw,sync,no_subtree_check,no_root_squash)
-          /data/cases 10.128.0.15(rw,sync,no_subtree_check,no_root_squash) 10.128.0.16(rw,sync,no_subtree_check,no_root_squash) 10.128.0.17(rw,sync,no_subtree_check,no_root_squash)
+          /data/evidence 10.128.0.19(rw,sync,no_subtree_check,no_root_squash) 10.128.0.20(rw,sync,no_subtree_check,no_root_squash) 10.128.0.18(rw,sync,no_subtree_check,no_root_squash)
+          /data/processed 10.128.0.19(rw,sync,no_subtree_check,no_root_squash) 10.128.0.20(rw,sync,no_subtree_check,no_root_squash) 10.128.0.18(rw,sync,no_subtree_check,no_root_squash)
+          /data/cases 10.128.0.19(rw,sync,no_subtree_check,no_root_squash) 10.128.0.20(rw,sync,no_subtree_check,no_root_squash) 10.128.0.18(rw,sync,no_subtree_check,no_root_squash)
         dest: /etc/exports
 
     - name: Start and enable NFS services

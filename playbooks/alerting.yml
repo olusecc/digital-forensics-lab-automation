@@ -1,0 +1,285 @@
+---
+- name: Configure ElastAlert for Real-time Monitoring
+  hosts: data_services
+  become: yes
+  tasks:
+    - name: Install ElastAlert2
+      pip:
+        name: elastalert2
+        executable: pip3
+        state: latest
+
+    - name: Create ElastAlert user
+      user:
+        name: elastalert
+        system: yes
+        home: /var/lib/elastalert
+        shell: /bin/false
+
+    - name: Create ElastAlert directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: elastalert
+        group: elastalert
+        mode: '0755'
+      loop:
+        - /etc/elastalert
+        - /etc/elastalert/rules
+        - /var/log/elastalert
+        - /var/lib/elastalert
+
+    - name: Create ElastAlert main configuration
+      copy:
+        content: |
+          rules_folder: /etc/elastalert/rules
+          run_every:
+            minutes: 1
+          buffer_time:
+            minutes: 5
+          es_host: localhost
+          es_port: 9200
+          writeback_index: elastalert_status
+          writeback_alias: elastalert_alerts
+          alert_time_limit:
+            days: 2
+          use_ssl: False
+          verify_certs: False
+          client_cert: null
+          client_key: null
+          ca_certs: null
+          es_username: null
+          es_password: null
+          es_url_prefix: ''
+          es_send_get_body_as: GET
+        dest: /etc/elastalert/config.yaml
+        owner: elastalert
+        group: elastalert
+        mode: '0644'
+
+    - name: Create IOC Match Alert Rule
+      copy:
+        content: |
+          name: High Priority IOC Match
+          type: any
+          index: forensics-*
+          filter:
+          - term:
+              misp_match: true
+          - range:
+              threat_score:
+                gt: 5
+          
+          alert:
+          - "email"
+          - "command"
+          
+          email:
+          - "forensics-alerts@company.com"
+          
+          alert_subject: "🚨 HIGH PRIORITY: IOC Match Detected - Case {0}"
+          alert_subject_args:
+          - case_id
+          
+          alert_text: |
+            URGENT: Threat Intelligence Match Detected!
+            
+            Case ID: {0}
+            Evidence Type: {1}
+            IOC Value: {2}
+            Threat Score: {3}
+            Match Source: MISP
+            
+            Immediate investigation required!
+            
+            Kibana Link: http://10.128.0.19:5601/app/discover#/?_g=(filters:!(),refreshInterval:(pause:!t,value:0),time:(from:now-1h,to:now))&_a=(columns:!(case_id,type,threat_score),filters:!(('$state':(store:appState),meta:(alias:!n,disabled:!f,key:case_id,negate:!f,params:(query:'{0}'),type:phrase),query:(match_phrase:(case_id:'{0}')))),index:'forensics-*',interval:auto,query:(language:kuery,query:''),sort:!(!('@timestamp',desc)))
+          
+          alert_text_args:
+          - case_id
+          - type
+          - file_hash
+          - threat_score
+          
+          command: ["/opt/scripts/send_notification.py", "CRITICAL", "IOC Match Detected for case {0}", "AutoAlert"]
+          pipe_alert_text: true
+        dest: /etc/elastalert/rules/ioc_match_critical.yaml
+        owner: elastalert
+        group: elastalert
+
+    - name: Create Suspicious Process Alert Rule
+      copy:
+        content: |
+          name: Suspicious Process Activity
+          type: frequency
+          index: forensics-volatility-*
+          num_events: 1
+          timeframe:
+            minutes: 5
+          
+          filter:
+          - terms:
+              process_name: ["cmd.exe", "powershell.exe", "wscript.exe", "cscript.exe", "regsvr32.exe", "rundll32.exe"]
+          
+          alert:
+          - "email"
+          
+          email:
+          - "forensics-alerts@company.com"
+          
+          alert_subject: "⚠️ Suspicious Process Activity - Case {0}"
+          alert_subject_args:
+          - case_id
+          
+          alert_text: |
+            Suspicious process activity detected during memory analysis:
+            
+            Case ID: {0}
+            Process Name: {1}
+            PID: {2}
+            Detection Time: {3}
+            
+            Please review the memory analysis results for potential malicious activity.
+            
+            Kibana Dashboard: http://10.128.0.19:5601/app/dashboards#/view/volatility-dashboard
+          
+          alert_text_args:
+          - case_id
+          - process_name
+          - pid
+          - "@timestamp"
+        dest: /etc/elastalert/rules/suspicious_processes.yaml
+        owner: elastalert
+        group: elastalert
+
+    - name: Create Malware Detection Alert Rule
+      copy:
+        content: |
+          name: Malware Detection Alert
+          type: any
+          index: forensics-cape-*
+          
+          filter:
+          - term:
+              yara_matches: true
+          
+          alert:
+          - "email"
+          - "command"
+          
+          email:
+          - "forensics-alerts@company.com"
+          
+          alert_subject: "🦠 MALWARE DETECTED - Case {0}"
+          alert_subject_args:
+          - case_id
+          
+          alert_text: |
+            MALWARE DETECTION ALERT
+            
+            Case ID: {0}
+            Sample Hash: {1}
+            Detection Method: YARA Rules
+            Analysis Type: {2}
+            
+            IMMEDIATE ACTION REQUIRED:
+            1. Quarantine related systems
+            2. Review full malware analysis report
+            3. Check for IOC propagation
+            4. Update security controls
+            
+            Analysis Details: /data/cases/{0}/analysis/
+          
+          alert_text_args:
+          - case_id
+          - sample_hash
+          - type
+          
+          command: ["/opt/scripts/send_notification.py", "MALWARE", "Malware detected in case {0}", "AutoAlert"]
+        dest: /etc/elastalert/rules/malware_detection.yaml
+        owner: elastalert
+        group: elastalert
+
+    - name: Create Case Processing Status Alert
+      copy:
+        content: |
+          name: Case Processing Complete
+          type: frequency
+          index: forensics-*
+          num_events: 10
+          timeframe:
+            minutes: 30
+          
+          filter:
+          - term:
+              lab_processed: true
+          
+          alert:
+          - "email"
+          
+          email:
+          - "forensics-team@company.com"
+          
+          alert_subject: "✅ Case Processing Complete - Case {0}"
+          alert_subject_args:
+          - case_id
+          
+          alert_text: |
+            Forensic analysis has been completed for case {0}.
+            
+            Summary:
+            - Total artifacts processed: {1}
+            - Evidence types analyzed: {2}
+            - Processing completed: {3}
+            
+            Next Steps:
+            1. Review analysis results in Kibana
+            2. Check for any IOC matches or alerts
+            3. Generate final case report
+            4. Update case status in IRIS
+            
+            Kibana Dashboard: http://10.128.0.19:5601
+            Case Files: /data/cases/{0}/
+          
+          alert_text_args:
+          - case_id
+          - doc_count
+          - type
+          - "@timestamp"
+        dest: /etc/elastalert/rules/case_processing_complete.yaml
+        owner: elastalert
+        group: elastalert
+
+    - name: Create ElastAlert systemd service
+      copy:
+        content: |
+          [Unit]
+          Description=ElastAlert2 Real-time Alerting
+          After=elasticsearch.service
+          Wants=elasticsearch.service
+          
+          [Service]
+          Type=simple
+          User=elastalert
+          Group=elastalert
+          WorkingDirectory=/var/lib/elastalert
+          ExecStart=/usr/local/bin/elastalert --config /etc/elastalert/config.yaml --verbose
+          Restart=always
+          RestartSec=10
+          StandardOutput=journal
+          StandardError=journal
+          
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/elastalert.service
+
+    - name: Initialize ElastAlert index
+      shell: elastalert-create-index --config /etc/elastalert/config.yaml
+      become_user: elastalert
+      ignore_errors: yes
+
+    - name: Start and enable ElastAlert service
+      systemd:
+        name: elastalert
+        state: started
+        enabled: yes
+        daemon_reload: yes

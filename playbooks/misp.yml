@@ -1,0 +1,111 @@
+---
+- name: Deploy MISP Threat Intelligence Platform
+  hosts: data_services
+  become: yes
+  tasks:
+    - name: Create MISP directory structure
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /opt/misp
+        - /opt/misp/mysql
+        - /opt/misp/redis
+        - /opt/misp/ssl
+
+    - name: Generate self-signed SSL certificates for MISP
+      shell: |
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+          -keyout /opt/misp/ssl/misp.key \
+          -out /opt/misp/ssl/misp.crt \
+          -subj "/C=US/ST=Lab/L=Forensics/O=Lab/CN=misp.forensicslab.local"
+      args:
+        creates: /opt/misp/ssl/misp.crt
+
+    - name: Create MISP Docker Compose configuration
+      copy:
+        content: |
+          version: '3.8'
+          services:
+            misp-db:
+              image: mysql:8.0
+              container_name: misp-db
+              restart: unless-stopped
+              environment:
+                MYSQL_DATABASE: misp
+                MYSQL_USER: misp
+                MYSQL_PASSWORD: misp_secure_password
+                MYSQL_ROOT_PASSWORD: root_secure_password
+              volumes:
+                - mysql_data:/var/lib/mysql
+              command: --default-authentication-plugin=mysql_native_password
+
+            misp-redis:
+              image: redis:7
+              container_name: misp-redis
+              restart: unless-stopped
+              volumes:
+                - redis_data:/data
+
+            misp:
+              image: misp/misp:latest
+              container_name: misp
+              restart: unless-stopped
+              depends_on:
+                - misp-db
+                - misp-redis
+              ports:
+                - "443:443"
+                - "80:80"
+              environment:
+                MYSQL_HOST: misp-db
+                MYSQL_DATABASE: misp
+                MYSQL_USER: misp
+                MYSQL_PASSWORD: misp_secure_password
+                REDIS_HOST: misp-redis
+                MISP_ADMIN_EMAIL: admin@forensicslab.local
+                MISP_ADMIN_PASSPHRASE: ForensicsAdmin2024!
+                MISP_BASEURL: http://10.128.0.19
+                MISP_ORGNAME: "Digital Forensics Lab"
+              volumes:
+                - misp_data:/var/www/MISP/app/tmp
+                - misp_logs:/var/www/MISP/app/tmp/logs
+
+          volumes:
+            mysql_data:
+            redis_data:
+            misp_data:
+            misp_logs:
+        dest: /opt/misp/docker-compose.yml
+
+    - name: Start MISP services
+      command: docker-compose up -d
+      args:
+        chdir: /opt/misp
+
+    - name: Wait for MISP to be ready
+      wait_for:
+        host: localhost
+        port: 80
+        delay: 60
+        timeout: 600
+
+    - name: Create MISP data directory
+      file:
+        path: /data/misp
+        state: directory
+        mode: '0755'
+
+    - name: Display MISP access information
+      debug:
+        msg: |
+          MISP is now accessible at:
+          HTTP: http://10.128.0.19
+          HTTPS: https://10.128.0.19
+          
+          Default credentials:
+          Email: admin@forensicslab.local
+          Password: ForensicsAdmin2024!
+          
+          Please change the default password after first login.

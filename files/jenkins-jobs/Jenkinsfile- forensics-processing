@@ -30,11 +30,11 @@ pipeline {
     }
     
     environment {
-        ELASTICSEARCH_HOST = '192.168.1.12'
-        KIBANA_HOST = '192.168.1.12'
-        MISP_HOST = '192.168.1.12'
-        IRIS_HOST = '192.168.1.12'
-        FORENSICS_SERVER = '192.168.1.11'
+        ELASTICSEARCH_HOST = '10.128.0.19'
+        KIBANA_HOST = '10.128.0.19'
+        MISP_HOST = '10.128.0.19'
+        IRIS_HOST = '10.128.0.19'
+        FORENSICS_SERVER = '10.128.0.18'
     }
     
     stages {
@@ -66,7 +66,7 @@ pipeline {
                     // Check if evidence file exists on forensics server
                     def fileExists = sh(
                         script: """
-                            ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '[ -f "${params.EVIDENCE_PATH}" ]'
+                            ssh -i ~/.ssh/cluster_key olusecc@${env.FORENSICS_SERVER} '[ -f "${params.EVIDENCE_PATH}" ]'
                         """,
                         returnStatus: true
                     )
@@ -77,7 +77,7 @@ pipeline {
                     
                     // Calculate and store evidence hash
                     sh """
-                        ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} 'sha256sum "${params.EVIDENCE_PATH}"' > workspace/evidence_hash.txt
+                        ssh -i ~/.ssh/cluster_key olusecc@${env.FORENSICS_SERVER} 'sha256sum "${params.EVIDENCE_PATH}"' > workspace/evidence_hash.txt
                         echo "Evidence hash calculated and stored"
                     """
                 }
@@ -87,7 +87,7 @@ pipeline {
         stage('Create Case Directory') {
             steps {
                 sh """
-                    ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                    ssh -i ~/.ssh/cluster_key olusecc@${env.FORENSICS_SERVER} '
                         mkdir -p /data/cases/${params.CASE_ID}/{evidence,analysis,reports}
                         echo "Case ${params.CASE_ID} created by ${params.INVESTIGATOR} at \$(date)" > /data/cases/${params.CASE_ID}/case_log.txt
                         echo "Description: ${params.CASE_DESCRIPTION}" >> /data/cases/${params.CASE_ID}/case_log.txt
@@ -106,7 +106,7 @@ pipeline {
                     switch(params.EVIDENCE_TYPE) {
                         case 'disk_image':
                             sh """
-                                ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                                ssh -i ~/.ssh/cluster_key olusecc@${env.FORENSICS_SERVER} '
                                     /opt/forensics/scripts/process_disk_image.sh \\
                                         "${params.CASE_ID}" \\
                                         "${params.EVIDENCE_PATH}" \\
@@ -117,7 +117,7 @@ pipeline {
                             
                         case 'memory_dump':
                             sh """
-                                ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                                ssh -i ~/.ssh/cluster_key olusecc@${env.FORENSICS_SERVER} '
                                     /opt/forensics/scripts/process_memory_dump.sh \\
                                         "${params.EVIDENCE_PATH}" \\
                                         "${analysisDir}" \\
@@ -128,7 +128,7 @@ pipeline {
                             
                         case 'mobile_data':
                             sh """
-                                ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                                ssh -i ~/.ssh/cluster_key olusecc@${env.FORENSICS_SERVER} '
                                     /opt/forensics/scripts/process_mobile_data.sh \\
                                         "${params.EVIDENCE_PATH}" \\
                                         "${analysisDir}" \\
@@ -139,7 +139,7 @@ pipeline {
                             
                         case 'malware_sample':
                             sh """
-                                ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                                ssh -i ~/.ssh/cluster_key olusecc@${env.FORENSICS_SERVER} '
                                     /opt/forensics/scripts/process_malware_sample.sh \\
                                         "${params.EVIDENCE_PATH}" \\
                                         "${analysisDir}" \\
@@ -174,7 +174,7 @@ pipeline {
         stage('Generate Summary Report') {
             steps {
                 sh """
-                    ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                    ssh -i ~/.ssh/cluster_key olusecc@${env.FORENSICS_SERVER} '
                         python3 /opt/forensics/scripts/generate_case_report.py \\
                             "${params.CASE_ID}" \\
                             "${params.EVIDENCE_TYPE}" \\
