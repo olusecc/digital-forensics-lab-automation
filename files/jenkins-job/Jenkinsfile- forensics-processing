@@ -1,0 +1,245 @@
+pipeline {
+    agent any
+    
+    parameters {
+        choice(
+            name: 'EVIDENCE_TYPE',
+            choices: ['disk_image', 'memory_dump', 'mobile_data', 'malware_sample'],
+            description: 'Type of evidence to process'
+        )
+        string(
+            name: 'CASE_ID',
+            defaultValue: '',
+            description: 'Case ID for evidence tracking (e.g., CASE-2024-001)'
+        )
+        string(
+            name: 'EVIDENCE_PATH',
+            defaultValue: '',
+            description: 'Full path to evidence file on forensics server'
+        )
+        string(
+            name: 'INVESTIGATOR',
+            defaultValue: '',
+            description: 'Investigator name'
+        )
+        text(
+            name: 'CASE_DESCRIPTION',
+            defaultValue: '',
+            description: 'Case description and notes'
+        )
+    }
+    
+    environment {
+        ELASTICSEARCH_HOST = '192.168.1.12'
+        KIBANA_HOST = '192.168.1.12'
+        MISP_HOST = '192.168.1.12'
+        IRIS_HOST = '192.168.1.12'
+        FORENSICS_SERVER = '192.168.1.11'
+    }
+    
+    stages {
+        stage('Validate Input') {
+            steps {
+                script {
+                    if (!params.CASE_ID) {
+                        error "Case ID is required"
+                    }
+                    if (!params.EVIDENCE_PATH) {
+                        error "Evidence path is required"
+                    }
+                    if (!params.INVESTIGATOR) {
+                        error "Investigator name is required"
+                    }
+                    
+                    echo "Processing Evidence:"
+                    echo "Case ID: ${params.CASE_ID}"
+                    echo "Evidence Type: ${params.EVIDENCE_TYPE}"
+                    echo "Evidence Path: ${params.EVIDENCE_PATH}"
+                    echo "Investigator: ${params.INVESTIGATOR}"
+                }
+            }
+        }
+        
+        stage('Validate Evidence File') {
+            steps {
+                script {
+                    // Check if evidence file exists on forensics server
+                    def fileExists = sh(
+                        script: """
+                            ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '[ -f "${params.EVIDENCE_PATH}" ]'
+                        """,
+                        returnStatus: true
+                    )
+                    
+                    if (fileExists != 0) {
+                        error "Evidence file not found: ${params.EVIDENCE_PATH}"
+                    }
+                    
+                    // Calculate and store evidence hash
+                    sh """
+                        ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} 'sha256sum "${params.EVIDENCE_PATH}"' > workspace/evidence_hash.txt
+                        echo "Evidence hash calculated and stored"
+                    """
+                }
+            }
+        }
+        
+        stage('Create Case Directory') {
+            steps {
+                sh """
+                    ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                        mkdir -p /data/cases/${params.CASE_ID}/{evidence,analysis,reports}
+                        echo "Case ${params.CASE_ID} created by ${params.INVESTIGATOR} at \$(date)" > /data/cases/${params.CASE_ID}/case_log.txt
+                        echo "Description: ${params.CASE_DESCRIPTION}" >> /data/cases/${params.CASE_ID}/case_log.txt
+                        echo "Evidence Type: ${params.EVIDENCE_TYPE}" >> /data/cases/${params.CASE_ID}/case_log.txt
+                        echo "Evidence Path: ${params.EVIDENCE_PATH}" >> /data/cases/${params.CASE_ID}/case_log.txt
+                    '
+                """
+            }
+        }
+        
+        stage('Process Evidence') {
+            steps {
+                script {
+                    def analysisDir = "/data/cases/${params.CASE_ID}/analysis"
+                    
+                    switch(params.EVIDENCE_TYPE) {
+                        case 'disk_image':
+                            sh """
+                                ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                                    /opt/forensics/scripts/process_disk_image.sh \\
+                                        "${params.CASE_ID}" \\
+                                        "${params.EVIDENCE_PATH}" \\
+                                        "${analysisDir}"
+                                '
+                            """
+                            break
+                            
+                        case 'memory_dump':
+                            sh """
+                                ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                                    /opt/forensics/scripts/process_memory_dump.sh \\
+                                        "${params.EVIDENCE_PATH}" \\
+                                        "${analysisDir}" \\
+                                        "${params.CASE_ID}"
+                                '
+                            """
+                            break
+                            
+                        case 'mobile_data':
+                            sh """
+                                ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                                    /opt/forensics/scripts/process_mobile_data.sh \\
+                                        "${params.EVIDENCE_PATH}" \\
+                                        "${analysisDir}" \\
+                                        "${params.CASE_ID}"
+                                '
+                            """
+                            break
+                            
+                        case 'malware_sample':
+                            sh """
+                                ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                                    /opt/forensics/scripts/process_malware_sample.sh \\
+                                        "${params.EVIDENCE_PATH}" \\
+                                        "${analysisDir}" \\
+                                        "${params.CASE_ID}"
+                                '
+                            """
+                            break
+                    }
+                }
+            }
+        }
+        
+        stage('Wait for Data Indexing') {
+            steps {
+                script {
+                    echo "Waiting for Logstash to process new data..."
+                    sleep(60) // Give Logstash time to process the files
+                    
+                    // Check if data was indexed
+                    def searchResult = sh(
+                        script: """
+                            curl -s "http://${env.ELASTICSEARCH_HOST}:9200/forensics-*/_search?q=case_id:${params.CASE_ID}&size=1" | jq '.hits.total.value'
+                        """,
+                        returnStdout: true
+                    ).trim()
+                    
+                    echo "Documents indexed for case ${params.CASE_ID}: ${searchResult}"
+                }
+            }
+        }
+        
+        stage('Generate Summary Report') {
+            steps {
+                sh """
+                    ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                        python3 /opt/forensics/scripts/generate_case_report.py \\
+                            "${params.CASE_ID}" \\
+                            "${params.EVIDENCE_TYPE}" \\
+                            "${params.INVESTIGATOR}" \\
+                            "/data/cases/${params.CASE_ID}/reports/"
+                    '
+                """
+            }
+        }
+    }
+    
+    post {
+        success {
+            script {
+                echo "✅ Evidence processing completed successfully for case: ${params.CASE_ID}"
+                
+                // Create success notification
+                writeFile file: 'notification.txt', text: """
+SUCCESS: Evidence Processing Complete
+
+Case ID: ${params.CASE_ID}
+Evidence Type: ${params.EVIDENCE_TYPE}
+Investigator: ${params.INVESTIGATOR}
+Processing Time: ${new Date()}
+
+Results available at:
+- Case Directory: /data/cases/${params.CASE_ID}
+- Kibana Dashboard: http://${env.KIBANA_HOST}:5601
+
+Next Steps:
+1. Review analysis results in case directory
+2. Check Kibana dashboards for visualizations
+3. Verify data indexing in Elasticsearch
+"""
+                
+                archiveArtifacts artifacts: 'notification.txt, workspace/evidence_hash.txt', allowEmptyArchive: true
+            }
+        }
+        
+        failure {
+            script {
+                echo "❌ Evidence processing failed for case: ${params.CASE_ID}"
+                
+                writeFile file: 'error_report.txt', text: """
+FAILURE: Evidence Processing Failed
+
+Case ID: ${params.CASE_ID}
+Evidence Type: ${params.EVIDENCE_TYPE}
+Investigator: ${params.INVESTIGATOR}
+Failure Time: ${new Date()}
+
+Please check:
+1. Evidence file accessibility
+2. Forensics server connectivity
+3. Processing script logs
+4. Available disk space
+"""
+                
+                archiveArtifacts artifacts: 'error_report.txt', allowEmptyArchive: true
+            }
+        }
+        
+        always {
+            // Clean workspace but preserve important files
+            cleanWs(patterns: [[pattern: '*.tmp', type: 'INCLUDE']])
+        }
+    }
+}

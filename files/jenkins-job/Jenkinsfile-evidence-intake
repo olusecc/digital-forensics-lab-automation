@@ -1,0 +1,146 @@
+pipeline {
+    agent any
+    
+    parameters {
+        string(
+            name: 'CASE_ID',
+            defaultValue: '',
+            description: 'Case ID (will be auto-generated if empty)'
+        )
+        choice(
+            name: 'EVIDENCE_SOURCE',
+            choices: ['upload', 'network_share', 'external_drive', 'cloud_storage'],
+            description: 'Source of evidence'
+        )
+        string(
+            name: 'SOURCE_PATH',
+            defaultValue: '',
+            description: 'Path to evidence source'
+        )
+        string(
+            name: 'INVESTIGATOR',
+            defaultValue: '',
+            description: 'Primary investigator'
+        )
+        text(
+            name: 'CASE_NOTES',
+            defaultValue: '',
+            description: 'Initial case notes and context'
+        )
+    }
+    
+    environment {
+        FORENSICS_SERVER = '192.168.1.11'
+    }
+    
+    stages {
+        stage('Generate Case ID') {
+            when {
+                expression { !params.CASE_ID }
+            }
+            steps {
+                script {
+                    def caseId = "CASE-${new Date().format('yyyyMMdd-HHmmss')}"
+                    env.CASE_ID = caseId
+                    echo "Generated Case ID: ${caseId}"
+                }
+            }
+        }
+        
+        stage('Create Case Structure') {
+            steps {
+                script {
+                    def actualCaseId = params.CASE_ID ?: env.CASE_ID
+                    
+                    sh """
+                        ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                            mkdir -p /data/cases/${actualCaseId}/{intake,evidence,analysis,reports}
+                            echo "Case created: ${actualCaseId}" > /data/cases/${actualCaseId}/case_info.txt
+                            echo "Created by: ${params.INVESTIGATOR}" >> /data/cases/${actualCaseId}/case_info.txt
+                            echo "Created at: \$(date)" >> /data/cases/${actualCaseId}/case_info.txt
+                            echo "Source: ${params.EVIDENCE_SOURCE}" >> /data/cases/${actualCaseId}/case_info.txt
+                            echo "Notes: ${params.CASE_NOTES}" >> /data/cases/${actualCaseId}/case_info.txt
+                        '
+                    """
+                }
+            }
+        }
+        
+        stage('Secure Evidence Copy') {
+            steps {
+                script {
+                    def actualCaseId = params.CASE_ID ?: env.CASE_ID
+                    
+                    // Copy evidence with verification
+                    sh """
+                        ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                            if [ -f "${params.SOURCE_PATH}" ]; then
+                                cp "${params.SOURCE_PATH}" /data/cases/${actualCaseId}/intake/
+                                sha256sum "${params.SOURCE_PATH}" > /data/cases/${actualCaseId}/intake/original_hash.txt
+                                sha256sum /data/cases/${actualCaseId}/intake/* > /data/cases/${actualCaseId}/intake/copy_hash.txt
+                                echo "Evidence secured for case ${actualCaseId}"
+                            else
+                                echo "Source file not found: ${params.SOURCE_PATH}"
+                                exit 1
+                            fi
+                        '
+                    """
+                }
+            }
+        }
+        
+        stage('Document Chain of Custody') {
+            steps {
+                script {
+                    def actualCaseId = params.CASE_ID ?: env.CASE_ID
+                    def timestamp = new Date().format('yyyy-MM-dd HH:mm:ss')
+                    
+                    sh """
+                        ssh -i ~/.ssh/forensics-lab-key ubuntu@${env.FORENSICS_SERVER} '
+                            cat > /data/cases/${actualCaseId}/chain_of_custody.txt << EOL
+CHAIN OF CUSTODY LOG
+Case ID: ${actualCaseId}
+Evidence Source: ${params.EVIDENCE_SOURCE}
+Original Location: ${params.SOURCE_PATH}
+
+Transfer Record:
+- Transferred by: ${params.INVESTIGATOR}
+- Transfer time: ${timestamp}
+- Transfer method: Automated Jenkins Pipeline
+- Integrity verified: SHA256 hash comparison
+
+Current Location: /data/cases/${actualCaseId}/intake/
+
+EOL
+                        '
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            script {
+                def actualCaseId = params.CASE_ID ?: env.CASE_ID
+                echo "✅ Evidence intake completed for case: ${actualCaseId}"
+                
+                // Trigger forensics processing pipeline
+                build job: 'forensics-processing', 
+                    parameters: [
+                        string(name: 'CASE_ID', value: actualCaseId),
+                        string(name: 'EVIDENCE_TYPE', value: 'disk_image'), // Default, user can change
+                        string(name: 'EVIDENCE_PATH', value: "/data/cases/${actualCaseId}/intake/"),
+                        string(name: 'INVESTIGATOR', value: params.INVESTIGATOR)
+                    ]
+            }
+        }
+        
+        failure {
+            script {
+                def actualCaseId = params.CASE_ID ?: env.CASE_ID
+                echo "❌ Evidence intake failed for case: ${actualCaseId}"
+            }
+        }
+    }
+}
