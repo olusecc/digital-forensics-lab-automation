@@ -3,6 +3,13 @@ import requests
 import json
 import sys
 from datetime import datetime
+# Import lab configuration
+try:
+    from lab_config import IRIS_URL, IRIS_SERVER
+except ImportError:
+    # Fallback to default if config not available
+    IRIS_URL = "https://10.128.0.19:443"
+    IRIS_SERVER = "10.128.0.19"
 
 class IRISIntegration:
     def __init__(self, iris_url, username, password):

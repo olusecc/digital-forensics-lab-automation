@@ -1,117 +1,355 @@
 ---
-- name: Deploy DFIR-IRIS Case Management System
+- name: Install Fresh DFIR-IRIS Case Management System
   hosts: data_services
   become: yes
   tasks:
-    - name: Create IRIS directory structure
+    - name: Stop IRIS containers only
+      shell: |
+        if command -v docker &> /dev/null && systemctl is-active --quiet docker; then
+          docker stop iriswebapp_nginx iriswebapp_app iriswebapp_worker iriswebapp_db iriswebapp_rabbitmq 2>/dev/null || true
+        fi
+      ignore_errors: yes
+
+    - name: Remove IRIS containers only
+      shell: |
+        if command -v docker &> /dev/null && systemctl is-active --quiet docker; then
+          docker rm iriswebapp_nginx iriswebapp_app iriswebapp_worker iriswebapp_db iriswebapp_rabbitmq 2>/dev/null || true
+        fi
+      ignore_errors: yes
+
+    - name: Remove IRIS Docker images only
+      shell: |
+        if command -v docker &> /dev/null && systemctl is-active --quiet docker; then
+          docker rmi $(docker images "ghcr.io/dfir-iris/*" -q) 2>/dev/null || true
+        fi
+      ignore_errors: yes
+
+    - name: Remove IRIS Docker volumes only
+      shell: |
+        if command -v docker &> /dev/null && systemctl is-active --quiet docker; then
+          docker volume rm iris-web_iris-downloads iris-web_user_templates iris-web_server_data iris-web_db_data 2>/dev/null || true
+          docker volume rm iris_iris-downloads iris_user_templates iris_server_data iris_db_data 2>/dev/null || true
+        fi
+      ignore_errors: yes
+
+    - name: Remove IRIS Docker networks only
+      shell: |
+        if command -v docker &> /dev/null && systemctl is-active --quiet docker; then
+          docker network rm iris_backend iris_frontend iris-web_iris_backend iris-web_iris_frontend 2>/dev/null || true
+        fi
+      ignore_errors: yes
+
+    - name: Remove IRIS installation directories only
       file:
         path: "{{ item }}"
-        state: directory
-        mode: '0755'
+        state: absent
       loop:
         - /opt/iris
-        - /opt/iris/postgres
-        - /opt/iris/uploads
+        - /home/formie/iris-web
+        - /home/olusecc/iris-web
+        - /root/iris-web
 
-    - name: Create IRIS Docker Compose configuration
+    - name: Update package cache and install prerequisites
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - git
+          - wget
+          - gnupg
+          - lsb-release
+        state: present
+        update_cache: yes
+
+    - name: Install Docker and Docker Compose
+      apt:
+        name:
+          - docker.io
+          - docker-compose
+        state: present
+        update_cache: yes
+
+    - name: Create Docker group
+      group:
+        name: docker
+        state: present
+
+    - name: Add users to Docker group
+      user:
+        name: "{{ item }}"
+        groups: docker
+        append: yes
+      loop:
+        - formie
+        - olusecc
+        - root
+
+    - name: Reset failed Docker services
+      shell: |
+        systemctl reset-failed docker.service || true
+        systemctl reset-failed docker.socket || true
+
+    - name: Start Docker socket first
+      systemd:
+        name: docker.socket
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Wait for Docker to be ready
+      wait_for:
+        path: /var/run/docker.sock
+        timeout: 60
+
+    - name: Verify Docker is working
+      shell: docker info
+      register: docker_info
+      retries: 3
+      delay: 10
+
+    - name: Create IRIS installation script
       copy:
         content: |
-          version: '3.8'
+          #!/bin/bash
+          
+          # Exit immediately if a command exits with a non-zero status
+          set -e
+          
+          # Ensure we're in the right directory
+          cd /home/formie
+          
+          # Remove any existing iris-web directory
+          rm -rf iris-web
+          
+          # Clone the iris-web repository
+          echo "Cloning the iris-web repository..."
+          git clone https://github.com/dfir-iris/iris-web.git
+          cd iris-web
+          
+          # Checkout to the last tagged version 
+          echo "Checking out the latest tagged version..."
+          git checkout $(git describe --tags `git rev-list --tags --max-count=1`)
+          
+          # Copy the environment file 
+          echo "Copying the environment file..."
+          cp .env.model .env
+          
+          # Create a new docker-compose.yml file
+          echo "Creating new docker-compose.yml file..."
+          cat > docker-compose.yml << 'EOL'
+          version: '3'
+          
           services:
-            iris-db:
-              image: postgres:13
-              container_name: iris-db
-              restart: unless-stopped
+            rabbitmq:
+              image: rabbitmq:3-management-alpine
+              container_name: iriswebapp_rabbitmq
+              restart: always
+              networks:
+                - iris_backend
+          
+            db:
+              image: ${DB_IMAGE_NAME:-ghcr.io/dfir-iris/iriswebapp_db}:${DB_IMAGE_TAG:-v2.4.14}
+              container_name: iriswebapp_db
+              restart: always
               environment:
-                POSTGRES_DB: iris
-                POSTGRES_USER: iris
-                POSTGRES_PASSWORD: iris_secure_password
-                POSTGRES_HOST_AUTH_METHOD: scram-sha-256
-                POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
+                - POSTGRES_USER
+                - POSTGRES_PASSWORD
+                - POSTGRES_ADMIN_USER
+                - POSTGRES_ADMIN_PASSWORD
+                - POSTGRES_DB
+              networks:
+                - iris_backend
               volumes:
-                - postgres_data:/var/lib/postgresql/data
-              ports:
-                - "5432:5432"
-
-            iris-redis:
-              image: redis:7
-              container_name: iris-redis
-              restart: unless-stopped
-
-            iris-web:
-              image: dfirtrack/iris-web:latest
-              container_name: iris-web
-              restart: unless-stopped
+                - db_data:/var/lib/postgresql/data
+          
+            app:
+              image: ${APP_IMAGE_NAME:-ghcr.io/dfir-iris/iriswebapp_app}:${APP_IMAGE_TAG:-v2.4.14}
+              container_name: iriswebapp_app
+              command: ['nohup', './iris-entrypoint.sh', 'iriswebapp']
+              volumes:
+                - ./certificates/rootCA/irisRootCACert.pem:/etc/irisRootCACert.pem:ro
+                - ./certificates/:/home/iris/certificates/:ro
+                - ./certificates/ldap/:/iriswebapp/certificates/ldap/:ro
+                - iris-downloads:/home/iris/downloads
+                - user_templates:/home/iris/user_templates
+                - server_data:/home/iris/server_data
+              restart: always
               depends_on:
-                - iris-db
-                - iris-redis
-              ports:
-                - "8000:8000"
+                - "rabbitmq"
+                - "db"
+              env_file:
+                - .env
               environment:
-                POSTGRES_SERVER: iris-db
-                POSTGRES_PORT: 5432
-                POSTGRES_DB: iris
-                POSTGRES_USER: iris
-                POSTGRES_PASSWORD: iris_secure_password
-                REDIS_SERVER: iris-redis
-                REDIS_PORT: 6379
-                SECRET_KEY: "iris-secret-key-change-this"
-                SECURITY_PASSWORD_SALT: "iris-salt-change-this"
-                CELERY_BROKER_URL: redis://iris-redis:6379/0
-                CELERY_RESULT_BACKEND: redis://iris-redis:6379/1
-                IRIS_UPSTREAM_SERVER: iris-web
-                IRIS_UPSTREAM_PORT: 8000
-                DOCKERIZED: 1
+                - POSTGRES_USER
+                - POSTGRES_PASSWORD
+                - POSTGRES_ADMIN_USER
+                - POSTGRES_ADMIN_PASSWORD
+                - POSTGRES_SERVER
+                - POSTGRES_PORT
+                - IRIS_SECRET_KEY
+                - IRIS_SECURITY_PASSWORD_SALT
+              networks:
+                - iris_backend
+                - iris_frontend
+          
+            worker:
+              image: ${APP_IMAGE_NAME:-ghcr.io/dfir-iris/iriswebapp_app}:${APP_IMAGE_TAG:-v2.4.14}
+              container_name: iriswebapp_worker
+              restart: always
+              command: ['./wait-for-iriswebapp.sh', 'app:8000', './iris-entrypoint.sh', 'iris-worker']
               volumes:
-                - uploads_data:/home/iris/downloads
-                - /data/cases:/home/iris/cases:ro
-
-            iris-worker:
-              image: dfirtrack/iris-web:latest
-              container_name: iris-worker
-              restart: unless-stopped
+                - ./certificates/rootCA/irisRootCACert.pem:/etc/irisRootCACert.pem:ro
+                - ./certificates/:/home/iris/certificates/:ro
+                - ./certificates/ldap/:/iriswebapp/certificates/ldap/:ro
+                - iris-downloads:/home/iris/downloads
+                - user_templates:/home/iris/user_templates
+                - server_data:/home/iris/server_data
               depends_on:
-                - iris-db
-                - iris-redis
+                - "rabbitmq"
+                - "db"
+                - "app"
+              env_file:
+                - .env
               environment:
-                POSTGRES_SERVER: iris-db
-                POSTGRES_PORT: 5432
-                POSTGRES_DB: iris
-                POSTGRES_USER: iris
-                POSTGRES_PASSWORD: iris_secure_password
-                REDIS_SERVER: iris-redis
-                REDIS_PORT: 6379
-                SECRET_KEY: "iris-secret-key-change-this"
-                SECURITY_PASSWORD_SALT: "iris-salt-change-this"
-                CELERY_BROKER_URL: redis://iris-redis:6379/0
-                CELERY_RESULT_BACKEND: redis://iris-redis:6379/1
-                DOCKERIZED: 1
-              command: ['celery', '--app=app.celery', 'worker', '--loglevel=INFO']
+                - POSTGRES_USER
+                - POSTGRES_PASSWORD
+                - POSTGRES_ADMIN_USER
+                - POSTGRES_ADMIN_PASSWORD
+                - POSTGRES_SERVER
+                - POSTGRES_PORT
+                - IRIS_SECRET_KEY
+                - IRIS_SECURITY_PASSWORD_SALT
+                - IRIS_WORKER
+              networks:
+                - iris_backend
+          
+            nginx:
+              image: ${NGINX_IMAGE_NAME:-ghcr.io/dfir-iris/iriswebapp_nginx}:${NGINX_IMAGE_TAG:-v2.4.14}
+              container_name: iriswebapp_nginx
+              environment:
+                - IRIS_UPSTREAM_SERVER
+                - IRIS_UPSTREAM_PORT
+                - INTERFACE_HTTPS_PORT
+                - SERVER_NAME
+                - CERT_FILENAME
+                - KEY_FILENAME
+                - IRIS_AUTHENTICATION_TYPE
+              networks:
+                - iris_frontend
+              ports:
+                - "${INTERFACE_HTTPS_PORT:-443}:${INTERFACE_HTTPS_PORT:-443}"
               volumes:
-                - uploads_data:/home/iris/downloads
-                - /data/cases:/home/iris/cases:ro
-
+                - "./certificates/web_certificates/:/www/certs/:ro"
+              restart: always
+              depends_on:
+                - "app"
+          
           volumes:
-            postgres_data:
-            uploads_data:
-        dest: /opt/iris/docker-compose.yml
+            iris-downloads:
+            user_templates:
+            server_data:
+            db_data:
+          
+          networks:
+            iris_backend:
+              name: iris_backend
+            iris_frontend:
+              name: iris_frontend
+          EOL
+          
+          echo "Updated docker-compose.yml:"
+          cat docker-compose.yml
+          
+          # Pull the dockers
+          echo "Pulling Docker images..."
+          docker-compose pull
+          
+          # Run IRIS 
+          echo "Starting IRIS..."
+          docker-compose up -d
+          
+          echo "DFIR-IRIS setup complete. It should now be running in the background."
+        dest: /tmp/install_iris.sh
+        mode: '0755'
 
-    - name: Start IRIS services
-      command: docker-compose up -d
-      args:
-        chdir: /opt/iris
+    - name: Change ownership of IRIS script
+      file:
+        path: /tmp/install_iris.sh
+        owner: formie
+        group: formie
+        mode: '0755'
+
+    - name: Run IRIS installation script as formie user
+      shell: |
+        runuser -l formie -c 'cd /home/formie && /tmp/install_iris.sh'
 
     - name: Wait for IRIS to be ready
       wait_for:
         host: localhost
-        port: 8000
+        port: 443
         delay: 60
         timeout: 600
+        msg: "IRIS did not start within 10 minutes"
 
-    - name: Display IRIS access information
+    - name: Extract IRIS default admin password from logs
+      shell: |
+        cd /home/formie/iris-web
+        docker-compose logs app | grep 'WARNING.*post_init.*create_safe_admin' | tail -1 | awk -F': ' '{print $NF}'
+      register: iris_default_password
+      retries: 5
+      delay: 10
+      until: iris_default_password.stdout != ""
+
+    - name: Display extracted admin password
+      debug:
+        msg: "IRIS default admin password: {{ iris_default_password.stdout }}"
+
+    - name: Test IRIS with curl
+      uri:
+        url: "https://localhost:443"
+        method: GET
+        status_code: [200, 302, 400, 403]
+        timeout: 30
+        validate_certs: false
+      register: iris_test
+
+    - name: Display IRIS status and access information
       debug:
         msg: |
-          DFIR-IRIS is now accessible at: http://10.128.0.19:8000
+          IRIS Installation Status: {{ 'SUCCESS' if iris_test.status in [200, 302, 400, 403] else 'FAILED' }}
+          IRIS Response Code: {{ iris_test.status }}
           
-          Initial setup requires creating an admin user.
-          Navigate to the URL above to complete setup.
+          DFIR-IRIS is now accessible at:
+          - Internal: https://10.128.0.19:443
+          - External: https://{{ ansible_default_ipv4.address }}:443
+          
+          ADMIN USER READY FOR ACCESS:
+          Username: administrator
+          Password: {{ iris_default_password.stdout | default('Not extracted') }}
+          
+          DIRECT ACCESS READY:
+          1. Open the IRIS URL above in your browser
+          2. Accept the self-signed certificate warning
+          3. Login with the credentials above - no password change needed!
+          4. Start managing your digital forensics cases
+          
+          IRIS installation directory: /home/formie/iris-web
+          Docker containers status can be checked with: docker ps
+
+    - name: Show running Docker containers
+      shell: docker ps
+      register: docker_status
+
+    - name: Display Docker containers status
+      debug:
+        msg: |
+          Running Docker Containers:
+          {{ docker_status.stdout }}

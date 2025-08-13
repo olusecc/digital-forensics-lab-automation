@@ -1,4 +1,7 @@
 ---
+# MISP Threat Intelligence Platform Deployment
+# NOTE: Currently configured for HTTP only on port 8080 to avoid conflicts with IRIS on port 443
+# HTTPS on port 8443 is commented out until port conflicts are resolved
 - name: Deploy MISP Threat Intelligence Platform
   hosts: data_services
   become: yes
@@ -23,20 +26,50 @@
       args:
         creates: /opt/misp/ssl/misp.crt
 
+    - name: Create MISP environment configuration
+      copy:
+        content: |
+          # Database Configuration
+          MYSQL_DATABASE=misp
+          MYSQL_USER=misp
+          MYSQL_PASSWORD=misp_secure_password
+          MYSQL_ROOT_PASSWORD=root_secure_password
+          
+          # MISP Configuration
+          HOSTNAME=http://10.128.0.19:8080
+          REDIS_FQDN=misp-redis
+          DB_HOST=misp-db
+          DB_PASSWORD=misp_secure_password
+          MISP_ADMIN_EMAIL=admin@forensicslab.local
+          MISP_ADMIN_PASSPHRASE=ForensicsAdmin2024!
+          MISP_BASEURL=http://10.128.0.19:8080
+          MISP_ORGNAME=Digital Forensics Lab
+          TIMEZONE=UTC
+          DISABLE_IPV6=true
+          WORKERS=4
+          CRON_USER_ID=1000
+          
+          # Additional MISP Settings
+          MISP_MODULES_FQDN=misp-modules
+          NOREDIR=true
+          DISIPV6=true
+        dest: /opt/misp/.env
+
     - name: Create MISP Docker Compose configuration
       copy:
         content: |
-          version: '3.8'
           services:
             misp-db:
               image: mysql:8.0
               container_name: misp-db
               restart: unless-stopped
+              env_file:
+                - .env
               environment:
-                MYSQL_DATABASE: misp
-                MYSQL_USER: misp
-                MYSQL_PASSWORD: misp_secure_password
-                MYSQL_ROOT_PASSWORD: root_secure_password
+                MYSQL_DATABASE: ${MYSQL_DATABASE}
+                MYSQL_USER: ${MYSQL_USER}
+                MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+                MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
               volumes:
                 - mysql_data:/var/lib/mysql
               command: --default-authentication-plugin=mysql_native_password
@@ -48,35 +81,61 @@
               volumes:
                 - redis_data:/data
 
+            misp-modules:
+              image: coolacid/misp-docker:modules-latest
+              container_name: misp-modules
+              restart: unless-stopped
+              env_file:
+                - .env
+              environment:
+                REDIS_FQDN: ${REDIS_FQDN}
+
             misp:
-              image: misp/misp:latest
+              image: coolacid/misp-docker:core-latest
               container_name: misp
               restart: unless-stopped
               depends_on:
                 - misp-db
                 - misp-redis
+                - misp-modules
               ports:
-                - "443:443"
-                - "80:80"
+                - "8080:80"
+                # Commented out to avoid conflict with IRIS on port 443
+                # - "8443:443"
+              env_file:
+                - .env
               environment:
-                MYSQL_HOST: misp-db
-                MYSQL_DATABASE: misp
-                MYSQL_USER: misp
-                MYSQL_PASSWORD: misp_secure_password
-                REDIS_HOST: misp-redis
-                MISP_ADMIN_EMAIL: admin@forensicslab.local
-                MISP_ADMIN_PASSPHRASE: ForensicsAdmin2024!
-                MISP_BASEURL: http://10.128.0.19
-                MISP_ORGNAME: "Digital Forensics Lab"
+                HOSTNAME: ${HOSTNAME}
+                REDIS_FQDN: ${REDIS_FQDN}
+                DB_HOST: ${DB_HOST}
+                DB_PASSWORD: ${DB_PASSWORD}
+                MISP_ADMIN_EMAIL: ${MISP_ADMIN_EMAIL}
+                MISP_ADMIN_PASSPHRASE: ${MISP_ADMIN_PASSPHRASE}
+                MISP_BASEURL: ${MISP_BASEURL}
+                MISP_ORGNAME: ${MISP_ORGNAME}
+                TIMEZONE: ${TIMEZONE}
+                DISABLE_IPV6: ${DISABLE_IPV6}
+                WORKERS: ${WORKERS}
+                CRON_USER_ID: ${CRON_USER_ID}
+                MISP_MODULES_FQDN: ${MISP_MODULES_FQDN}
+                NOREDIR: ${NOREDIR}
+                DISIPV6: ${DISIPV6}
               volumes:
                 - misp_data:/var/www/MISP/app/tmp
                 - misp_logs:/var/www/MISP/app/tmp/logs
+                - misp_files:/var/www/MISP/app/files
+                - misp_config:/var/www/MISP/app/Config
+                # SSL certificates commented out to avoid port conflicts with IRIS
+                # - ./ssl/misp.crt:/etc/nginx/certs/cert.pem:ro
+                # - ./ssl/misp.key:/etc/nginx/certs/key.pem:ro
 
           volumes:
             mysql_data:
             redis_data:
             misp_data:
             misp_logs:
+            misp_files:
+            misp_config:
         dest: /opt/misp/docker-compose.yml
 
     - name: Start MISP services
@@ -87,22 +146,15 @@
     - name: Wait for MISP to be ready
       wait_for:
         host: localhost
-        port: 80
+        port: 8080
         delay: 60
         timeout: 600
-
-    - name: Create MISP data directory
-      file:
-        path: /data/misp
-        state: directory
-        mode: '0755'
 
     - name: Display MISP access information
       debug:
         msg: |
           MISP is now accessible at:
-          HTTP: http://10.128.0.19
-          HTTPS: https://10.128.0.19
+          HTTP: http://10.128.0.19:8080
           
           Default credentials:
           Email: admin@forensicslab.local

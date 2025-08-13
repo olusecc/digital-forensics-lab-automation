@@ -9,7 +9,7 @@ def generate_case_summary(case_id, evidence_type, investigator, output_dir):
     """Generate case summary report"""
     
     # Query Elasticsearch for case data
-    elasticsearch_url = "http://10.128.0.19:9200"
+    elasticsearch_url = "http://192.168.1.12:9200"
     
     try:
         # Search for all data related to this case
@@ -118,7 +118,7 @@ def generate_case_summary(case_id, evidence_type, investigator, output_dir):
         <p>This automated analysis was performed using the Digital Forensics Lab pipeline.</p>
         <p>For detailed results, please review:</p>
         <ul>
-            <li>Kibana Dashboard: http://10.128.0.19:5601</li>
+            <li>Kibana Dashboard: http://192.168.1.12:5601</li>
             <li>Raw analysis files in case directory</li>
             <li>Elasticsearch indices: forensics-*</li>
         </ul>

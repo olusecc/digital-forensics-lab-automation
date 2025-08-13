@@ -5,7 +5,7 @@ import time
 
 def create_kibana_dashboards():
     """Create forensics-specific Kibana dashboards"""
-    kibana_url = "http://10.128.0.19:5601"
+    kibana_url = "http://192.168.1.12:5601"
     
     # Wait for Kibana to be fully ready
     print("Waiting for Kibana to be ready...")

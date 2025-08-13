@@ -1,0 +1,125 @@
+<?xml version='1.1' encoding='UTF-8'?>
+<flow-definition plugin="workflow-job@1427.vb_67d25e050de">
+  <description>Automated disk image analysis pipeline for digital forensics evidence processing</description>
+  <keepDependencies>false</keepDependencies>
+  <properties>
+    <hudson.model.ParametersDefinitionProperty>
+      <parameterDefinitions>
+        <hudson.model.StringParameterDefinition>
+          <name>EVIDENCE_FILE</name>
+          <description>Path to the disk image file to analyze</description>
+          <defaultValue>/var/lib/jenkins/forensics/evidence/sample.dd</defaultValue>
+          <trim>false</trim>
+        </hudson.model.StringParameterDefinition>
+        <hudson.model.StringParameterDefinition>
+          <name>CASE_NUMBER</name>
+          <description>Case number for tracking and reporting</description>
+          <defaultValue>CASE-001</defaultValue>
+          <trim>false</trim>
+        </hudson.model.StringParameterDefinition>
+        <hudson.model.StringParameterDefinition>
+          <name>INVESTIGATOR</name>
+          <description>Name of the investigator</description>
+          <defaultValue>Digital Forensics Team</defaultValue>
+          <trim>false</trim>
+        </hudson.model.StringParameterDefinition>
+        <hudson.model.BooleanParameterDefinition>
+          <name>GENERATE_TIMELINE</name>
+          <description>Generate timeline analysis</description>
+          <defaultValue>true</defaultValue>
+        </hudson.model.BooleanParameterDefinition>
+        <hudson.model.BooleanParameterDefinition>
+          <name>PERFORM_IOC_SCAN</name>
+          <description>Perform IOC scanning with MISP integration</description>
+          <defaultValue>true</defaultValue>
+        </hudson.model.BooleanParameterDefinition>
+      </parameterDefinitions>
+    </hudson.model.ParametersDefinitionProperty>
+  </properties>
+  <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps@3774.v6a_5f59e13dd6">
+    <script>
+@Library('pipeline-library') _
+
+pipeline {
+    agent any
+    
+    parameters {
+        string(name: 'EVIDENCE_FILE', defaultValue: '/var/lib/jenkins/forensics/evidence/sample.dd', description: 'Path to disk image')
+        string(name: 'CASE_NUMBER', defaultValue: 'CASE-001', description: 'Case number')
+        string(name: 'INVESTIGATOR', defaultValue: 'Digital Forensics Team', description: 'Investigator name')
+        booleanParam(name: 'GENERATE_TIMELINE', defaultValue: true, description: 'Generate timeline analysis')
+        booleanParam(name: 'PERFORM_IOC_SCAN', defaultValue: true, description: 'Perform IOC scanning')
+    }
+    
+    stages {
+        stage('Initialize') {
+            steps {
+                script {
+                    echo "Starting forensics analysis for case: ${params.CASE_NUMBER}"
+                    echo "Evidence file: ${params.EVIDENCE_FILE}"
+                    echo "Investigator: ${params.INVESTIGATOR}"
+                }
+            }
+        }
+        
+        stage('Validate Evidence') {
+            steps {
+                script {
+                    echo "Validating evidence file..."
+                    sh "ls -la '${params.EVIDENCE_FILE}' || echo 'Evidence file not found - this is expected for demo'"
+                }
+            }
+        }
+        
+        stage('Process Evidence') {
+            steps {
+                script {
+                    echo "Processing disk image with forensic tools..."
+                    // Call our forensics processing pipeline
+                    forensicsProcessEvidence([
+                        evidenceFile: params.EVIDENCE_FILE,
+                        caseNumber: params.CASE_NUMBER,
+                        investigator: params.INVESTIGATOR,
+                        generateTimeline: params.GENERATE_TIMELINE,
+                        performIOCScan: params.PERFORM_IOC_SCAN
+                    ])
+                }
+            }
+        }
+        
+        stage('Generate Report') {
+            steps {
+                script {
+                    echo "Generating final forensics report..."
+                    sh """
+                        mkdir -p /var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}
+                        echo 'Forensics Analysis Report' > /var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}/report.txt
+                        echo 'Case: ${params.CASE_NUMBER}' >> /var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}/report.txt
+                        echo 'Investigator: ${params.INVESTIGATOR}' >> /var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}/report.txt
+                        echo 'Analysis completed at: \$(date)' >> /var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}/report.txt
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo "Forensics pipeline completed for case: ${params.CASE_NUMBER}"
+            archiveArtifacts artifacts: "forensics/reports/${params.CASE_NUMBER}/*", fingerprint: true
+        }
+        success {
+            echo "Forensics analysis completed successfully!"
+        }
+        failure {
+            echo "Forensics analysis failed. Check logs for details."
+        }
+    }
+}
+    </script>
+    <sandbox>true</sandbox>
+  </definition>
+  <triggers/>
+  <disabled>false</disabled>
+</flow-definition>
+    

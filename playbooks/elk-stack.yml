@@ -167,7 +167,6 @@
     - name: Create Docker Compose for ELK Stack
       copy:
         content: |
-          version: '3.8'
           services:
             elasticsearch:
               image: docker.elastic.co/elasticsearch/elasticsearch:{{ elasticsearch_version }}
@@ -238,104 +237,31 @@
         group: "{{ ansible_user }}"
         recurse: yes
 
-    - name: Set proper ownership for Elasticsearch data and logs directories
-      file:
-        path: "{{ item }}"
-        owner: "1000"
-        group: "1000"
-        recurse: yes
-        state: directory
-      loop:
-        - /opt/elk/elasticsearch/data
-        - /opt/elk/elasticsearch/logs
-
-    - name: Set proper ownership for Logstash directories
-      file:
-        path: "{{ item }}"
-        owner: "1000"
-        group: "1000"
-        recurse: yes
-        state: directory
-      loop:
-        - /opt/elk/logstash
-
-    - name: Set proper ownership for Kibana directories
-      file:
-        path: "{{ item }}"
-        owner: "1000"
-        group: "1000"
-        recurse: yes
-        state: directory
-      loop:
-        - /opt/elk/kibana
-
-    - name: Set proper permissions for ELK directories
-      file:
-        path: "{{ item }}"
-        mode: '0755'
-        recurse: yes
-      loop:
-        - /opt/elk/elasticsearch
-        - /opt/elk/logstash
-        - /opt/elk/kibana
-
-    - name: Install Docker and Docker Compose
-      apt:
-        name:
-          - docker.io
-          - docker-compose
-        state: present
-        update_cache: yes
-
-    - name: Start and enable Docker service
-      systemd:
-        name: docker
-        state: started
-        enabled: yes
-
-    - name: Add user to docker group
-      user:
-        name: "{{ ansible_user }}"
-        groups: docker
-        append: yes
-
-    - name: Deploy ELK Stack with Docker Compose
-      shell: |
-        cd /opt/elk
-        docker-compose down || true
-        docker-compose up -d
-      become_user: "{{ ansible_user }}"
+    - name: Start ELK Stack services
+      command: docker-compose up -d
+      args:
+        chdir: /opt/elk
 
     - name: Wait for Elasticsearch to be ready
-      uri:
-        url: "http://localhost:9200/_cluster/health"
-        method: GET
+      wait_for:
+        host: localhost
+        port: 9200
+        delay: 30
         timeout: 300
-      register: elasticsearch_health
-      until: elasticsearch_health.status == 200 and elasticsearch_health.json.status in ["yellow", "green"]
-      retries: 30
-      delay: 10
 
     - name: Wait for Kibana to be ready
-      uri:
-        url: "http://localhost:5601/api/status"
-        method: GET
-        timeout: 300
-      register: kibana_health
-      until: kibana_health.status == 200 and kibana_health.json.status.overall.level == "available"
-      retries: 30
-      delay: 10
+      wait_for:
+        host: localhost
+        port: 5601
+        delay: 60
+        timeout: 600
 
-    - name: Display ELK Stack access information
+    - name: Display ELK access information
       debug:
         msg: |
-          ELK Stack is now running and accessible:
+          ELK Stack is now accessible at:
+          Elasticsearch: http://10.128.0.19:9200
+          Kibana: http://10.128.0.19:5601
+          Logstash: http://10.128.0.19:9600
           
-          Elasticsearch: http://{{ ansible_default_ipv4.address }}:9200
-          Kibana: http://{{ ansible_default_ipv4.address }}:5601
-          Logstash: Listening on port 5044 for Beats input
-          
-          You can now:
-          1. Access Kibana in your browser for data visualization
-          2. Send forensics data to Logstash for processing
-          3. Query Elasticsearch directly for raw data access
+          Logstash will process forensics data from /data/processed/

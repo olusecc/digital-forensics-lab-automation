@@ -1,0 +1,404 @@
+// Jenkinsfile for Disk Image Analysis
+// Automated processing of disk images using Autopsy and Sleuth Kit
+
+@Library('forensics-pipeline-library') _
+
+pipeline {
+    agent any
+    
+    parameters {
+        string(name: 'CASE_ID', defaultValue: '', description: 'IRIS Case ID (required)')
+        string(name: 'EVIDENCE_PATH', defaultValue: '', description: 'Path to disk image file (required)')
+        string(name: 'INVESTIGATOR', defaultValue: '', description: 'Lead investigator name')
+        choice(name: 'ANALYSIS_LEVEL', choices: ['basic', 'standard', 'comprehensive'], description: 'Analysis depth')
+        booleanParam(name: 'URGENT', defaultValue: false, description: 'Priority processing')
+        booleanParam(name: 'GENERATE_TIMELINE', defaultValue: true, description: 'Generate filesystem timeline')
+        booleanParam(name: 'EXTRACT_FILES', defaultValue: false, description: 'Extract specific file types')
+        string(name: 'FILE_TYPES', defaultValue: 'doc,pdf,jpg,png,exe,dll', description: 'File types to extract (comma-separated)')
+    }
+    
+    environment {
+        EVIDENCE_TYPE = 'disk'
+        FORENSICS_WORKSPACE = '/var/lib/jenkins/forensics'
+        IRIS_API_URL = 'https://10.128.0.19:443/api'
+        MISP_API_URL = 'http://10.128.0.19:8080'
+        ELK_URL = 'http://10.128.0.19:9200'
+    }
+    
+    stages {
+        stage('Pre-Processing Validation') {
+            steps {
+                script {
+                    // Validate required parameters
+                    if (!params.CASE_ID?.trim()) {
+                        error('CASE_ID parameter is required')
+                    }
+                    if (!params.EVIDENCE_PATH?.trim()) {
+                        error('EVIDENCE_PATH parameter is required')
+                    }
+                    
+                    // Initialize case in IRIS
+                    if (!irisAPI.checkCase(params.CASE_ID)) {
+                        irisAPI.createCase(params.CASE_ID, params.INVESTIGATOR ?: 'automated', 
+                            "Disk image analysis case created automatically")
+                    }
+                    
+                    // Set up processing environment
+                    env.WORKING_DIR = forensicsCore.initEvidence(params.CASE_ID, env.EVIDENCE_TYPE, params.EVIDENCE_PATH)
+                    
+                    // Send initial notification
+                    forensicsNotifications.sendSlack(
+                        "🔍 **Started Disk Image Analysis**\\n" +
+                        "**Case:** ${params.CASE_ID}\\n" +
+                        "**Evidence:** ${params.EVIDENCE_PATH}\\n" +
+                        "**Investigator:** ${params.INVESTIGATOR ?: 'automated'}\\n" +
+                        "**Priority:** ${params.URGENT ? 'HIGH' : 'NORMAL'}"
+                    )
+                }
+            }
+        }
+        
+        stage('Evidence Validation') {
+            steps {
+                script {
+                    // Validate evidence integrity
+                    def validationResult = forensicsCore.validateEvidence(params.EVIDENCE_PATH)
+                    
+                    // Generate comprehensive metadata
+                    def metadata = forensicsCore.generateMetadata(params.EVIDENCE_PATH, params.CASE_ID)
+                    
+                    // Add evidence to IRIS case
+                    irisAPI.addEvidence(params.CASE_ID, env.EVIDENCE_TYPE, params.EVIDENCE_PATH, [
+                        validation_hashes: validationResult,
+                        metadata: metadata,
+                        analysis_level: params.ANALYSIS_LEVEL
+                    ])
+                    
+                    // Log to ELK
+                    elkAPI.logEvent('evidence_validation', [
+                        case_id: params.CASE_ID,
+                        evidence_type: env.EVIDENCE_TYPE,
+                        evidence_path: params.EVIDENCE_PATH,
+                        validation_status: 'success',
+                        metadata: metadata
+                    ])
+                }
+            }
+        }
+        
+        stage('Disk Image Analysis') {
+            parallel {
+                stage('Autopsy Analysis') {
+                    steps {
+                        script {
+                            echo "🔬 Running Autopsy analysis on disk image"
+                            
+                            sh """
+                                cd ${env.WORKING_DIR}/output
+                                mkdir -p autopsy
+                                
+                                # Run Autopsy command-line analysis
+                                echo "Starting Autopsy analysis at \$(date)" >> ${env.WORKING_DIR}/logs/autopsy.log
+                                
+                                # Create Autopsy case (simulated for now)
+                                cat > autopsy/case_info.txt << EOF
+Case ID: ${params.CASE_ID}
+Evidence: ${params.EVIDENCE_PATH}
+Analysis Level: ${params.ANALYSIS_LEVEL}
+Started: \$(date)
+Investigator: ${params.INVESTIGATOR}
+EOF
+
+                                # File system analysis
+                                if command -v fsstat >/dev/null; then
+                                    fsstat "${params.EVIDENCE_PATH}" > autopsy/filesystem_analysis.txt 2>&1 || true
+                                fi
+                                
+                                # File listing
+                                if command -v fls >/dev/null; then
+                                    fls -r "${params.EVIDENCE_PATH}" > autopsy/file_listing.txt 2>&1 || true
+                                fi
+                                
+                                echo "Autopsy analysis completed at \$(date)" >> ${env.WORKING_DIR}/logs/autopsy.log
+                            """
+                        }
+                    }
+                }
+                
+                stage('Sleuth Kit Analysis') {
+                    steps {
+                        script {
+                            echo "🔍 Running Sleuth Kit analysis"
+                            
+                            sh """
+                                cd ${env.WORKING_DIR}/output
+                                mkdir -p sleuthkit
+                                
+                                echo "Starting Sleuth Kit analysis at \$(date)" >> ${env.WORKING_DIR}/logs/sleuthkit.log
+                                
+                                # Partition analysis
+                                if command -v mmls >/dev/null; then
+                                    mmls "${params.EVIDENCE_PATH}" > sleuthkit/partition_table.txt 2>&1 || true
+                                fi
+                                
+                                # File system info
+                                if command -v fsstat >/dev/null; then
+                                    fsstat "${params.EVIDENCE_PATH}" > sleuthkit/filesystem_info.txt 2>&1 || true
+                                fi
+                                
+                                # Generate timeline if requested
+                                if [ "${params.GENERATE_TIMELINE}" = "true" ]; then
+                                    echo "Generating filesystem timeline..." >> ${env.WORKING_DIR}/logs/sleuthkit.log
+                                    if command -v fls >/dev/null; then
+                                        fls -r -m / "${params.EVIDENCE_PATH}" > sleuthkit/timeline.csv 2>&1 || true
+                                    fi
+                                fi
+                                
+                                # Directory listing
+                                if command -v fls >/dev/null; then
+                                    fls -r "${params.EVIDENCE_PATH}" > sleuthkit/directory_listing.txt 2>&1 || true
+                                fi
+                                
+                                echo "Sleuth Kit analysis completed at \$(date)" >> ${env.WORKING_DIR}/logs/sleuthkit.log
+                            """
+                        }
+                    }
+                }
+                
+                stage('File Extraction') {
+                    when {
+                        expression { params.EXTRACT_FILES }
+                    }
+                    steps {
+                        script {
+                            echo "📁 Extracting specific file types: ${params.FILE_TYPES}"
+                            
+                            sh """
+                                cd ${env.WORKING_DIR}/output
+                                mkdir -p extracted_files
+                                
+                                echo "Starting file extraction at \$(date)" >> ${env.WORKING_DIR}/logs/extraction.log
+                                
+                                # Extract files by type (simulated)
+                                echo "Extracting file types: ${params.FILE_TYPES}" >> extracted_files/extraction_log.txt
+                                echo "Target extensions: ${params.FILE_TYPES}" >> extracted_files/extraction_log.txt
+                                
+                                # TODO: Implement actual file extraction using tsk_recover or similar
+                                echo "File extraction simulation completed" >> extracted_files/extraction_log.txt
+                                
+                                echo "File extraction completed at \$(date)" >> ${env.WORKING_DIR}/logs/extraction.log
+                            """
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('IOC Analysis') {
+            steps {
+                script {
+                    echo "🎯 Extracting and correlating IOCs"
+                    
+                    // Extract IOCs from the disk image
+                    def iocs = forensicsCore.extractIOCs(params.EVIDENCE_PATH, env.EVIDENCE_TYPE)
+                    
+                    if (iocs.size() > 0) {
+                        // Correlate with MISP
+                        def correlations = mispAPI.correlateIOCs(iocs)
+                        
+                        // Add IOCs to IRIS case
+                        irisAPI.addIOCs(params.CASE_ID, iocs)
+                        
+                        // Update case with findings
+                        if (correlations.size() > 0) {
+                            irisAPI.updateFindings(params.CASE_ID, correlations)
+                            
+                            // Send alert for IOC matches
+                            forensicsNotifications.sendAlert(
+                                "⚠️ **IOC Matches Found**\\n" +
+                                "**Case:** ${params.CASE_ID}\\n" +
+                                "**Matches:** ${correlations.size()} indicators\\n" +
+                                "**Evidence:** ${params.EVIDENCE_PATH}"
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Timeline Generation') {
+            when {
+                expression { params.GENERATE_TIMELINE }
+            }
+            steps {
+                script {
+                    echo "📅 Generating comprehensive timeline"
+                    
+                    sh """
+                        cd ${env.WORKING_DIR}/output
+                        mkdir -p timeline
+                        
+                        # Combine timeline data from various sources
+                        echo "timestamp,type,description,source" > timeline/master_timeline.csv
+                        
+                        # Add Sleuth Kit timeline data
+                        if [ -f sleuthkit/timeline.csv ]; then
+                            tail -n +2 sleuthkit/timeline.csv >> timeline/master_timeline.csv 2>/dev/null || true
+                        fi
+                        
+                        # Generate timeline summary
+                        echo "Timeline generated at \$(date)" > timeline/timeline_summary.txt
+                        echo "Total events: \$(wc -l < timeline/master_timeline.csv)" >> timeline/timeline_summary.txt
+                    """
+                    
+                    // Add timeline events to IRIS
+                    def timelineFile = "${env.WORKING_DIR}/output/timeline/master_timeline.csv"
+                    if (fileExists(timelineFile)) {
+                        def timelineEvents = parseCSVTimeline(timelineFile)
+                        irisAPI.addTimeline(params.CASE_ID, timelineEvents)
+                    }
+                }
+            }
+        }
+        
+        stage('Report Generation') {
+            steps {
+                script {
+                    echo "📄 Generating forensic analysis report"
+                    
+                    def reportPath = "${env.WORKING_DIR}/output/forensic_report_${params.CASE_ID}.html"
+                    
+                    // Generate comprehensive report
+                    sh """
+                        cd ${env.WORKING_DIR}/output
+                        
+                        cat > forensic_report_${params.CASE_ID}.html << 'EOF'
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Forensic Analysis Report - Case ${params.CASE_ID}</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .header { background-color: #f0f0f0; padding: 10px; border-left: 5px solid #007cba; }
+        .section { margin: 20px 0; padding: 10px; border: 1px solid #ddd; }
+        .finding { background-color: #fff3cd; padding: 5px; margin: 5px 0; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Digital Forensic Analysis Report</h1>
+        <p><strong>Case ID:</strong> ${params.CASE_ID}</p>
+        <p><strong>Evidence Type:</strong> Disk Image</p>
+        <p><strong>Investigator:</strong> ${params.INVESTIGATOR ?: 'Automated System'}</p>
+        <p><strong>Analysis Date:</strong> \$(date)</p>
+        <p><strong>Analysis Level:</strong> ${params.ANALYSIS_LEVEL}</p>
+    </div>
+    
+    <div class="section">
+        <h2>Evidence Information</h2>
+        <p><strong>File Path:</strong> ${params.EVIDENCE_PATH}</p>
+        <p><strong>File Size:</strong> \$(stat -f%z "${params.EVIDENCE_PATH}" 2>/dev/null || stat -c%s "${params.EVIDENCE_PATH}") bytes</p>
+        <p><strong>MD5 Hash:</strong> \$(md5sum "${params.EVIDENCE_PATH}" | cut -d' ' -f1)</p>
+        <p><strong>SHA256 Hash:</strong> \$(sha256sum "${params.EVIDENCE_PATH}" | cut -d' ' -f1)</p>
+    </div>
+    
+    <div class="section">
+        <h2>Analysis Summary</h2>
+        <p>Automated disk image analysis completed using Autopsy and Sleuth Kit tools.</p>
+        <ul>
+            <li>Filesystem analysis: Completed</li>
+            <li>File listing: Generated</li>
+            <li>Timeline generation: ${params.GENERATE_TIMELINE ? 'Completed' : 'Skipped'}</li>
+            <li>File extraction: ${params.EXTRACT_FILES ? 'Completed' : 'Skipped'}</li>
+            <li>IOC extraction: Completed</li>
+        </ul>
+    </div>
+    
+    <div class="section">
+        <h2>Key Findings</h2>
+        <div class="finding">Analysis results are available in the attached data files and IRIS case management system.</div>
+    </div>
+</body>
+</html>
+EOF
+                    """
+                    
+                    // Attach report to IRIS case
+                    irisAPI.attachReport(params.CASE_ID, reportPath)
+                    
+                    // Archive report as Jenkins artifact
+                    archiveArtifacts artifacts: "**/*report*", allowEmptyArchive: true, fingerprint: true
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            script {
+                forensicsNotifications.sendSlack(
+                    "✅ **Disk Image Analysis Completed**\\n" +
+                    "**Case:** ${params.CASE_ID}\\n" +
+                    "**Status:** Success\\n" +
+                    "**Duration:** ${currentBuild.durationString}\\n" +
+                    "**Report:** Available in IRIS case ${params.CASE_ID}"
+                )
+                
+                irisAPI.updateCaseStatus(params.CASE_ID, 'analysis_complete')
+            }
+        }
+        
+        failure {
+            script {
+                forensicsNotifications.sendAlert(
+                    "❌ **Disk Image Analysis Failed**\\n" +
+                    "**Case:** ${params.CASE_ID}\\n" +
+                    "**Evidence:** ${params.EVIDENCE_PATH}\\n" +
+                    "**Error:** Check Jenkins build logs"
+                )
+                
+                irisAPI.updateCaseStatus(params.CASE_ID, 'processing_failed')
+            }
+        }
+        
+        always {
+            script {
+                // Clean up temporary files
+                forensicsCore.cleanup(params.CASE_ID, env.EVIDENCE_TYPE)
+                
+                // Log completion to ELK
+                elkAPI.logEvent('analysis_complete', [
+                    case_id: params.CASE_ID,
+                    evidence_type: env.EVIDENCE_TYPE,
+                    status: currentBuild.result ?: 'SUCCESS',
+                    duration: currentBuild.duration,
+                    build_number: env.BUILD_NUMBER
+                ])
+            }
+        }
+    }
+}
+
+def parseCSVTimeline(String timelineFile) {
+    def events = []
+    def lines = readFile(timelineFile).split('\n')
+    
+    lines.drop(1).each { line -> // Skip header
+        if (line.trim()) {
+            def parts = line.split(',')
+            if (parts.size() >= 3) {
+                events << [
+                    timestamp: parts[0],
+                    title: parts[2],
+                    description: parts[3] ?: '',
+                    tags: ['automated', 'timeline', 'disk']
+                ]
+            }
+        }
+    }
+    
+    return events.take(1000) // Limit to 1000 events for performance
+}

@@ -5,6 +5,13 @@ import sys
 from datetime import datetime
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+# Import lab configuration
+try:
+    from lab_config import MISP_URL, MISP_SERVER
+except ImportError:
+    # Fallback to default if config not available
+    MISP_URL = "http://10.128.0.19:80"
+    MISP_SERVER = "10.128.0.19"
 
 class MISPIntegration:
     def __init__(self, misp_url, api_key):
