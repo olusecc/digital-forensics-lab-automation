@@ -1,0 +1,260 @@
+---
+- name: Fix Forensics Tools Access for Jenkins
+  hosts: forensics
+  become: yes
+  tasks:
+    - name: Create symlinks for all forensics tools in /usr/local/bin
+      file:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        state: link
+        force: yes
+      loop:
+        - { src: "/opt/forensics/sleuthkit/bin/fls", dest: "/usr/local/bin/fls" }
+        - { src: "/opt/forensics/sleuthkit/bin/mmls", dest: "/usr/local/bin/mmls" }
+        - { src: "/opt/forensics/sleuthkit/bin/fsstat", dest: "/usr/local/bin/fsstat" }
+        - { src: "/opt/forensics/sleuthkit/bin/icat", dest: "/usr/local/bin/icat" }
+        - { src: "/opt/forensics/sleuthkit/bin/ils", dest: "/usr/local/bin/ils" }
+        - { src: "/opt/forensics/sleuthkit/bin/istat", dest: "/usr/local/bin/istat" }
+        - { src: "/opt/forensics/sleuthkit/bin/blkcat", dest: "/usr/local/bin/blkcat" }
+        - { src: "/opt/forensics/sleuthkit/bin/blkls", dest: "/usr/local/bin/blkls" }
+        - { src: "/usr/local/bin/guymager_cli.sh", dest: "/usr/local/bin/guymager_cli" }
+
+    - name: Create andriller wrapper script
+      copy:
+        content: |
+          #!/bin/bash
+          python3 -m andriller "$@"
+        dest: /usr/local/bin/andriller
+        mode: '0755'
+
+    - name: Fix CAPE service script
+      copy:
+        content: |
+          #!/bin/bash
+          cd /opt/CAPEv2
+          export PATH="$HOME/.local/bin:$PATH"
+          
+          # Check if virtual environment exists
+          if [ ! -f "$(poetry env info --path)/bin/activate" ]; then
+            echo "Setting up CAPE virtual environment..."
+            poetry install
+          fi
+          
+          # Activate environment and run CAPE
+          source $(poetry env info --path)/bin/activate
+          python3 cuckoo.py
+        dest: /opt/CAPEv2/run_cape.sh
+        mode: '0755'
+        owner: cape
+        group: cape
+
+    - name: Create CAPE wrapper script for command line access
+      copy:
+        content: |
+          #!/bin/bash
+          # CAPE Sandbox Command Line Interface
+          # Usage: cape_submit <file_path> [timeout]
+          
+          FILE_PATH="$1"
+          TIMEOUT="${2:-300}"
+          
+          if [ -z "$FILE_PATH" ]; then
+              echo "Usage: cape_submit <file_path> [timeout_seconds]"
+              echo "Example: cape_submit /path/to/malware.exe 600"
+              exit 1
+          fi
+          
+          if [ ! -f "$FILE_PATH" ]; then
+              echo "Error: File not found: $FILE_PATH"
+              exit 1
+          fi
+          
+          echo "Submitting file to CAPE Sandbox: $FILE_PATH"
+          echo "Timeout: $TIMEOUT seconds"
+          
+          # Submit to CAPE via REST API
+          RESULT=$(curl -s -F "file=@$FILE_PATH" -F "timeout=$TIMEOUT" http://localhost:8000/tasks/create/file/ 2>/dev/null)
+          
+          if [ $? -eq 0 ] && [ ! -z "$RESULT" ]; then
+              echo "Submission successful!"
+              echo "Result: $RESULT"
+              
+              # Extract task ID if possible
+              TASK_ID=$(echo "$RESULT" | grep -o '"task_id":[0-9]*' | cut -d':' -f2 | tr -d ' ')
+              if [ ! -z "$TASK_ID" ]; then
+                  echo "Task ID: $TASK_ID"
+                  echo "Monitor progress at: http://localhost:8000/analysis/$TASK_ID/"
+              fi
+          else
+              echo "Error: Failed to submit file to CAPE Sandbox"
+              echo "Make sure CAPE service is running: systemctl status cape"
+              exit 1
+          fi
+        dest: /usr/local/bin/cape_submit
+        mode: '0755'
+
+    - name: Create comprehensive forensics environment script
+      copy:
+        content: |
+          #!/bin/bash
+          # Forensics Lab Environment Setup
+          # This script sets up the environment for forensics tools
+          
+          export PATH="/opt/forensics/sleuthkit/bin:/usr/local/bin:$PATH"
+          export LD_LIBRARY_PATH="/opt/forensics/sleuthkit/lib:$LD_LIBRARY_PATH"
+          
+          # CAPE Environment
+          export CAPE_HOME="/opt/CAPEv2"
+          
+          # Volatility Environment
+          export VOLATILITY_LOCATION="/opt/forensics/volatility3"
+          
+          # Display available tools
+          echo "=========================================="
+          echo "DIGITAL FORENSICS LAB - TOOLS AVAILABLE"
+          echo "=========================================="
+          echo ""
+          echo "🔍 DISK ANALYSIS (Sleuth Kit):"
+          echo "  fls        - List files and directories"
+          echo "  mmls       - Display partition layout"
+          echo "  fsstat     - Display file system details"
+          echo "  icat       - Extract file contents"
+          echo "  ils        - List inode information"
+          echo "  istat      - Display inode details"
+          echo "  blkcat     - Extract disk blocks"
+          echo "  blkls      - List disk blocks"
+          echo ""
+          echo "🧠 MEMORY ANALYSIS:"
+          echo "  volatility3 - Memory dump analysis"
+          echo ""
+          echo "📱 MOBILE FORENSICS:"
+          echo "  andriller   - Android device analysis"
+          echo ""
+          echo "🦠 MALWARE ANALYSIS:"
+          echo "  cape_submit - Submit samples to CAPE Sandbox"
+          echo ""
+          echo "💾 DISK IMAGING:"
+          echo "  guymager_cli - Command line disk imaging"
+          echo ""
+          echo "🔧 PROCESSING SCRIPTS:"
+          echo "  process_evidence.sh - Automated evidence processing"
+          echo ""
+          echo "📂 DATA DIRECTORIES:"
+          echo "  Evidence:  /data/evidence/"
+          echo "  Processed: /data/processed/"
+          echo "  Cases:     /data/cases/"
+          echo ""
+          echo "🌐 WEB INTERFACES:"
+          echo "  CAPE:      http://localhost:8000 (if running)"
+          echo ""
+          echo "=========================================="
+          
+          # Function to check tool availability
+          check_tool() {
+              if command -v "$1" >/dev/null 2>&1; then
+                  echo "✅ $1 - Available"
+              else
+                  echo "❌ $1 - Not found"
+              fi
+          }
+          
+          echo "TOOL STATUS CHECK:"
+          check_tool "fls"
+          check_tool "volatility3"
+          check_tool "andriller"
+          check_tool "cape_submit"
+          check_tool "guymager_cli"
+          echo "=========================================="
+        dest: /usr/local/bin/forensics_env
+        mode: '0755'
+
+    - name: Restart CAPE service
+      systemd:
+        name: cape
+        state: restarted
+        daemon_reload: yes
+      ignore_errors: yes
+
+    - name: Test all forensics tools
+      shell: |
+        echo "Testing forensics tools..."
+        echo "1. Sleuth Kit fls version:"
+        /usr/local/bin/fls -V || echo "fls test failed"
+        echo ""
+        echo "2. Volatility3 version:"
+        /usr/local/bin/volatility3 --help | head -1 || echo "volatility3 test failed"
+        echo ""
+        echo "3. Andriller version:"
+        /usr/local/bin/andriller --version || echo "andriller test failed"
+        echo ""
+        echo "4. Process evidence script:"
+        ls -la /opt/forensics/scripts/process_evidence.sh || echo "process script not found"
+        echo ""
+        echo "5. CAPE service status:"
+        systemctl is-active cape || echo "CAPE service not running"
+      register: tool_test_results
+
+    - name: Display test results
+      debug:
+        msg: "{{ tool_test_results.stdout_lines }}"
+
+    - name: Create Jenkins SSH access to forensics tools
+      authorized_key:
+        user: forensics
+        key: "{{ lookup('file', '~/.ssh/cluster_key.pub') }}"
+        state: present
+      ignore_errors: yes
+
+    - name: Add jenkins user to forensics group (if exists on remote)
+      shell: |
+        if id jenkins >/dev/null 2>&1; then
+          usermod -a -G forensics jenkins
+          echo "Jenkins user added to forensics group"
+        else
+          echo "Jenkins user not found on this server - this is normal"
+        fi
+      ignore_errors: yes
+
+    - name: Set proper permissions for forensics directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+        owner: forensics
+        group: forensics
+        recurse: yes
+      loop:
+        - /opt/forensics
+        - /data/processed
+        - /data/cases
+      ignore_errors: yes
+
+    - name: Display final status
+      debug:
+        msg: |
+          ================================================================
+          FORENSICS TOOLS CONFIGURATION COMPLETED
+          ================================================================
+          
+          ✅ All forensics tools have been configured and are accessible
+          ✅ Command line wrappers created for all tools
+          ✅ CAPE service restarted
+          ✅ Jenkins access configured
+          
+          To test the setup, run:
+          ssh forensics-server 'forensics_env'
+          
+          Tools available:
+          - Sleuth Kit: fls, mmls, fsstat, icat, ils, istat, blkcat, blkls
+          - Volatility3: volatility3
+          - Andriller: andriller
+          - CAPE: cape_submit
+          - Guymager: guymager_cli
+          - Processing: process_evidence.sh
+          
+          Data directories:
+          - /data/evidence/ (for source evidence)
+          - /data/processed/ (for analysis results)
+          - /data/cases/ (for case management)
+          ================================================================

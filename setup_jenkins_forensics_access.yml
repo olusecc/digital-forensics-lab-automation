@@ -1,0 +1,352 @@
+---
+- name: Setup Jenkins Access to Forensics Tools
+  hosts: forensics
+  become: yes
+  tasks:
+    - name: Find andriller installation path
+      shell: |
+        python3 -c "import andriller; print(andriller.__file__)" | sed 's|/__init__.py||' | xargs dirname
+      register: andriller_path
+
+    - name: Create andriller symlink for system-wide access
+      file:
+        src: "{{ andriller_path.stdout }}/andriller"
+        dest: /usr/local/bin/andriller
+        state: link
+        force: yes
+      when: andriller_path.stdout is defined
+
+    - name: Create forensics processing script for Jenkins
+      copy:
+        content: |
+          #!/bin/bash
+          # Forensics Lab Processing Script
+          # Usage: ./process_evidence.sh <evidence_path> <case_id> [evidence_type]
+          
+          EVIDENCE_PATH="$1"
+          CASE_ID="$2"
+          EVIDENCE_TYPE="$3"
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          
+          if [ -z "$EVIDENCE_PATH" ] || [ -z "$CASE_ID" ]; then
+              echo "Usage: $0 <evidence_path> <case_id> [evidence_type]"
+              echo "Evidence types: memory, disk, mobile, malware, device"
+              exit 1
+          fi
+          
+          # Create case directory structure
+          mkdir -p "/data/cases/$CASE_ID"/{evidence,reports,timeline,artifacts}
+          
+          echo "=========================================="
+          echo "FORENSICS LAB EVIDENCE PROCESSING"
+          echo "=========================================="
+          echo "Case ID: $CASE_ID"
+          echo "Evidence: $EVIDENCE_PATH"
+          echo "Type: $EVIDENCE_TYPE"
+          echo "Timestamp: $TIMESTAMP"
+          echo "=========================================="
+          
+          # Auto-detect evidence type if not provided
+          if [ -z "$EVIDENCE_TYPE" ]; then
+              if [[ "$EVIDENCE_PATH" == *.mem ]] || [[ "$EVIDENCE_PATH" == *.vmem ]] || [[ "$EVIDENCE_PATH" == *.raw ]]; then
+                  EVIDENCE_TYPE="memory"
+              elif [[ "$EVIDENCE_PATH" == *.dd ]] || [[ "$EVIDENCE_PATH" == *.img ]] || [[ "$EVIDENCE_PATH" == *.e01 ]]; then
+                  EVIDENCE_TYPE="disk"
+              elif [[ "$EVIDENCE_PATH" == *.ab ]] || [[ "$EVIDENCE_PATH" == *.tar ]]; then
+                  EVIDENCE_TYPE="mobile"
+              elif [[ "$EVIDENCE_PATH" == *.exe ]] || [[ "$EVIDENCE_PATH" == *.bin ]] || [[ "$EVIDENCE_PATH" == *.dll ]]; then
+                  EVIDENCE_TYPE="malware"
+              elif [[ "$EVIDENCE_PATH" == /dev/* ]]; then
+                  EVIDENCE_TYPE="device"
+              else
+                  EVIDENCE_TYPE="unknown"
+              fi
+              echo "Auto-detected evidence type: $EVIDENCE_TYPE"
+          fi
+          
+          # Process based on evidence type
+          case "$EVIDENCE_TYPE" in
+              "device")
+                  echo "Processing physical device with Guymager..."
+                  /usr/local/bin/guymager_cli.sh "$EVIDENCE_PATH" "$CASE_ID" "E001"
+                  echo "Device imaging completed"
+                  ;;
+              "memory")
+                  echo "Processing memory dump with Volatility3..."
+                  /usr/local/bin/volatility3 -f "$EVIDENCE_PATH" windows.info > "/data/processed/volatility/${CASE_ID}_${TIMESTAMP}_info.txt"
+                  /usr/local/bin/volatility3 -f "$EVIDENCE_PATH" windows.pslist > "/data/processed/volatility/${CASE_ID}_${TIMESTAMP}_pslist.txt"
+                  /usr/local/bin/volatility3 -f "$EVIDENCE_PATH" windows.psscan > "/data/processed/volatility/${CASE_ID}_${TIMESTAMP}_psscan.txt"
+                  /usr/local/bin/volatility3 -f "$EVIDENCE_PATH" windows.netscan > "/data/processed/volatility/${CASE_ID}_${TIMESTAMP}_netscan.txt"
+                  echo "Memory analysis completed"
+                  ;;
+              "disk")
+                  echo "Processing disk image with Sleuth Kit..."
+                  # Sleuth Kit analysis
+                  /opt/forensics/sleuthkit/bin/fls -r "$EVIDENCE_PATH" > "/data/processed/autopsy/${CASE_ID}_${TIMESTAMP}_filelist.txt"
+                  /opt/forensics/sleuthkit/bin/mmls "$EVIDENCE_PATH" > "/data/processed/autopsy/${CASE_ID}_${TIMESTAMP}_partitions.txt" 2>/dev/null || true
+                  /opt/forensics/sleuthkit/bin/fsstat "$EVIDENCE_PATH" > "/data/processed/autopsy/${CASE_ID}_${TIMESTAMP}_filesystem.txt" 2>/dev/null || true
+                  echo "Disk analysis completed"
+                  ;;
+              "mobile")
+                  echo "Processing mobile data with Andriller..."
+                  /usr/local/bin/andriller -d "$EVIDENCE_PATH" -o "/data/processed/andriller/${CASE_ID}_${TIMESTAMP}/"
+                  echo "Mobile analysis completed"
+                  ;;
+              "malware")
+                  echo "Processing malware sample with CAPE Sandbox..."
+                  # Submit to CAPE for analysis
+                  curl -F "file=@$EVIDENCE_PATH" -F "timeout=300" http://localhost:8000/tasks/create/file/ > "/data/processed/cape/${CASE_ID}_${TIMESTAMP}_submission.json" 2>/dev/null
+                  echo "Malware submitted to CAPE Sandbox"
+                  ;;
+              *)
+                  echo "Unknown evidence type. Performing basic analysis..."
+                  file "$EVIDENCE_PATH" > "/data/cases/$CASE_ID/evidence/${CASE_ID}_${TIMESTAMP}_file_info.txt"
+                  md5sum "$EVIDENCE_PATH" > "/data/cases/$CASE_ID/evidence/${CASE_ID}_${TIMESTAMP}_md5.txt"
+                  sha256sum "$EVIDENCE_PATH" > "/data/cases/$CASE_ID/evidence/${CASE_ID}_${TIMESTAMP}_sha256.txt"
+                  ;;
+          esac
+          
+          # Generate processing report
+          echo "Generating processing report..."
+          cat > "/data/cases/$CASE_ID/reports/${CASE_ID}_${TIMESTAMP}_processing_report.txt" << EOF
+          FORENSICS LAB PROCESSING REPORT
+          ================================
+          Case ID: $CASE_ID
+          Evidence Path: $EVIDENCE_PATH
+          Evidence Type: $EVIDENCE_TYPE
+          Processing Date: $(date)
+          Processed By: $(whoami)
+          
+          Files Generated:
+          $(find /data/processed -name "${CASE_ID}_${TIMESTAMP}*" 2>/dev/null || echo "None found")
+          
+          Processing completed successfully.
+          EOF
+          
+          echo "=========================================="
+          echo "Processing complete for case: $CASE_ID"
+          echo "Report saved to: /data/cases/$CASE_ID/reports/${CASE_ID}_${TIMESTAMP}_processing_report.txt"
+          echo "=========================================="
+        dest: /opt/forensics/scripts/process_evidence.sh
+        mode: '0755'
+        owner: forensics
+        group: forensics
+
+    - name: Create Guymager command line wrapper script
+      copy:
+        content: |
+          #!/bin/bash
+          # Guymager Command Line Wrapper
+          # Usage: guymager_cli.sh <source_device> <case_id> <evidence_number>
+          
+          SOURCE_DEVICE="$1"
+          CASE_ID="$2"
+          EVIDENCE_NUMBER="$3"
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          
+          if [ -z "$SOURCE_DEVICE" ] || [ -z "$CASE_ID" ] || [ -z "$EVIDENCE_NUMBER" ]; then
+              echo "Usage: $0 <source_device> <case_id> <evidence_number>"
+              echo "Example: $0 /dev/sdb CASE001 E001"
+              exit 1
+          fi
+          
+          OUTPUT_DIR="/data/processed/guymager"
+          OUTPUT_FILE="${OUTPUT_DIR}/${CASE_ID}_${EVIDENCE_NUMBER}_${TIMESTAMP}"
+          
+          echo "Starting Guymager acquisition..."
+          echo "Source Device: $SOURCE_DEVICE"
+          echo "Case ID: $CASE_ID"
+          echo "Evidence Number: $EVIDENCE_NUMBER"
+          echo "Output File: $OUTPUT_FILE"
+          
+          # Create output directory if it doesn't exist
+          mkdir -p "$OUTPUT_DIR"
+          
+          # Note: Guymager is primarily a GUI tool
+          # For command line forensic imaging, we'll use dd with verification
+          echo "Creating forensic image with dd and verification..."
+          dd if="$SOURCE_DEVICE" of="${OUTPUT_FILE}.dd" bs=64K conv=noerror,sync status=progress
+          
+          echo "Calculating hashes for verification..."
+          md5sum "$SOURCE_DEVICE" > "${OUTPUT_FILE}_source.md5"
+          md5sum "${OUTPUT_FILE}.dd" > "${OUTPUT_FILE}_image.md5"
+          sha256sum "$SOURCE_DEVICE" > "${OUTPUT_FILE}_source.sha256"
+          sha256sum "${OUTPUT_FILE}.dd" > "${OUTPUT_FILE}_image.sha256"
+          
+          echo "Forensic imaging complete!"
+          echo "Image file: ${OUTPUT_FILE}.dd"
+          echo "Hash files created for verification"
+        dest: /usr/local/bin/guymager_cli.sh
+        mode: '0755'
+
+    - name: Create Jenkins forensics wrapper script
+      copy:
+        content: |
+          #!/bin/bash
+          # Jenkins Forensics Tools Wrapper
+          # This script provides Jenkins with easy access to all forensics tools
+          
+          TOOL="$1"
+          shift
+          ARGS="$@"
+          
+          case "$TOOL" in
+              "volatility3")
+                  /usr/local/bin/volatility3 $ARGS
+                  ;;
+              "sleuthkit"|"fls"|"mmls"|"fsstat"|"icat"|"tsk_recover")
+                  export PATH="/opt/forensics/sleuthkit/bin:$PATH"
+                  /opt/forensics/sleuthkit/bin/$TOOL $ARGS 2>/dev/null || /opt/forensics/sleuthkit/bin/fls $ARGS
+                  ;;
+              "andriller")
+                  /usr/local/bin/andriller $ARGS
+                  ;;
+              "cape")
+                  # Submit file to CAPE sandbox
+                  FILE_PATH="$1"
+                  if [ -f "$FILE_PATH" ]; then
+                      curl -F "file=@$FILE_PATH" -F "timeout=300" http://localhost:8000/tasks/create/file/
+                  else
+                      echo "Error: File not found: $FILE_PATH"
+                      exit 1
+                  fi
+                  ;;
+              "process_evidence")
+                  /opt/forensics/scripts/process_evidence.sh $ARGS
+                  ;;
+              "guymager")
+                  /usr/local/bin/guymager_cli.sh $ARGS
+                  ;;
+              "list_tools")
+                  echo "Available forensics tools:"
+                  echo "  volatility3 - Memory analysis"
+                  echo "  sleuthkit   - Disk analysis (fls, mmls, fsstat, etc.)"
+                  echo "  andriller   - Mobile device analysis"
+                  echo "  cape        - Malware analysis sandbox"
+                  echo "  guymager    - Disk imaging"
+                  echo "  process_evidence - Automated evidence processing"
+                  ;;
+              *)
+                  echo "Unknown tool: $TOOL"
+                  echo "Use: $0 list_tools to see available tools"
+                  exit 1
+                  ;;
+          esac
+        dest: /usr/local/bin/forensics
+        mode: '0755'
+
+    - name: Create symlinks for Sleuth Kit tools in /usr/local/bin
+      file:
+        src: "/opt/forensics/sleuthkit/bin/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        state: link
+        force: yes
+      loop:
+        - fls
+        - mmls
+        - fsstat
+        - icat
+        - tsk_recover
+        - img_stat
+        - blkls
+
+    - name: Update PATH for jenkins user to include forensics tools
+      lineinfile:
+        path: /etc/environment
+        line: 'PATH="/opt/forensics/sleuthkit/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
+        regexp: '^PATH='
+
+    - name: Create forensics tool status check script
+      copy:
+        content: |
+          #!/bin/bash
+          # Forensics Tools Status Check
+          
+          echo "=========================================="
+          echo "FORENSICS LAB TOOLS STATUS CHECK"
+          echo "=========================================="
+          
+          echo "1. Volatility3:"
+          if command -v volatility3 &> /dev/null; then
+              echo "   ✅ Available at: $(which volatility3)"
+              volatility3 --help | head -1 2>/dev/null || echo "   ⚠️  Installed but may have issues"
+          else
+              echo "   ❌ Not available"
+          fi
+          
+          echo ""
+          echo "2. Sleuth Kit:"
+          if command -v fls &> /dev/null; then
+              echo "   ✅ Available at: $(which fls)"
+              fls -V 2>/dev/null | head -1 || echo "   ⚠️  Installed but may have issues"
+          else
+              echo "   ❌ Not available"
+          fi
+          
+          echo ""
+          echo "3. Andriller:"
+          if command -v andriller &> /dev/null; then
+              echo "   ✅ Available at: $(which andriller)"
+              andriller --version 2>/dev/null || echo "   ⚠️  Installed but may have issues"
+          else
+              echo "   ❌ Not available"
+          fi
+          
+          echo ""
+          echo "4. CAPE Sandbox:"
+          if [ -d "/opt/CAPEv2" ]; then
+              echo "   ✅ Installed at: /opt/CAPEv2"
+              if systemctl is-active cape &> /dev/null; then
+                  echo "   ✅ Service is running"
+              else
+                  echo "   ⚠️  Service not running"
+              fi
+          else
+              echo "   ❌ Not installed"
+          fi
+          
+          echo ""
+          echo "5. Guymager:"
+          if command -v guymager &> /dev/null; then
+              echo "   ✅ GUI version available"
+          fi
+          if command -v guymager_cli.sh &> /dev/null; then
+              echo "   ✅ CLI wrapper available at: $(which guymager_cli.sh)"
+          else
+              echo "   ❌ CLI wrapper not available"
+          fi
+          
+          echo ""
+          echo "6. NFS Storage:"
+          if mount | grep -q "/data/evidence"; then
+              echo "   ✅ Evidence storage mounted"
+          else
+              echo "   ❌ Evidence storage not mounted"
+          fi
+          
+          if mount | grep -q "/data/processed"; then
+              echo "   ✅ Processed data storage mounted"
+          else
+              echo "   ❌ Processed data storage not mounted"
+          fi
+          
+          echo ""
+          echo "7. Processing Scripts:"
+          if [ -f "/opt/forensics/scripts/process_evidence.sh" ]; then
+              echo "   ✅ Evidence processing script available"
+          else
+              echo "   ❌ Evidence processing script missing"
+          fi
+          
+          if [ -f "/usr/local/bin/forensics" ]; then
+              echo "   ✅ Forensics wrapper script available"
+          else
+              echo "   ❌ Forensics wrapper script missing"
+          fi
+          
+          echo ""
+          echo "=========================================="
+          echo "Status check completed at $(date)"
+          echo "=========================================="
+        dest: /usr/local/bin/forensics_status
+        mode: '0755'

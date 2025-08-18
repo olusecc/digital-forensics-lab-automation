@@ -4,7 +4,7 @@
   become: yes
   vars:
     elasticsearch_version: "8.11.0"
-    elasticsearch_heap_size: "1g"
+    elasticsearch_heap_size: "4g"
   tasks:
     - name: Create ELK directory structure
       file:
@@ -183,14 +183,19 @@
                 - "9200:9200"
                 - "9300:9300"
               volumes:
-                - ./elasticsearch/data:/usr/share/elasticsearch/data
-                - ./elasticsearch/logs:/usr/share/elasticsearch/logs
-                - ./elasticsearch/config/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml
+                - ./elasticsearch/data:/usr/share/elasticsearch/data:Z
+                - ./elasticsearch/logs:/usr/share/elasticsearch/logs:Z
+                - ./elasticsearch/config/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
               restart: unless-stopped
               ulimits:
                 memlock:
                   soft: -1
                   hard: -1
+              healthcheck:
+                test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
 
             logstash:
               image: docker.elastic.co/logstash/logstash:{{ elasticsearch_version }}
@@ -222,6 +227,11 @@
               depends_on:
                 - elasticsearch
               restart: unless-stopped
+              healthcheck:
+                test: ["CMD-SHELL", "curl -f http://localhost:5601/api/status || exit 1"]
+                interval: 30s
+                timeout: 10s
+                retries: 5
 
           volumes:
             elasticsearch_data:
@@ -237,31 +247,61 @@
         group: "{{ ansible_user }}"
         recurse: yes
 
+    - name: Fix Elasticsearch data and logs directory permissions for Docker
+      file:
+        path: "{{ item }}"
+        owner: "1000"
+        group: "1000"
+        mode: '0755'
+        recurse: yes
+      loop:
+        - /opt/elk/elasticsearch/data
+        - /opt/elk/elasticsearch/logs
+
+    - name: Ensure Elasticsearch directories have correct SELinux context (if SELinux is enabled)
+      shell: |
+        if command -v semanage >/dev/null 2>&1; then
+          setsebool -P container_manage_cgroup on || true
+          chcon -Rt svirt_sandbox_file_t /opt/elk/elasticsearch/data || true
+          chcon -Rt svirt_sandbox_file_t /opt/elk/elasticsearch/logs || true
+        fi
+      ignore_errors: yes
+
     - name: Start ELK Stack services
       command: docker-compose up -d
       args:
         chdir: /opt/elk
 
     - name: Wait for Elasticsearch to be ready
-      wait_for:
-        host: localhost
-        port: 9200
-        delay: 30
-        timeout: 300
+      uri:
+        url: http://localhost:9200/_cluster/health
+        method: GET
+        status_code: 200
+      register: elasticsearch_health
+      until: elasticsearch_health.status == 200
+      retries: 30
+      delay: 10
 
     - name: Wait for Kibana to be ready
-      wait_for:
-        host: localhost
-        port: 5601
-        delay: 60
-        timeout: 600
+      uri:
+        url: http://localhost:5601/api/status
+        method: GET
+        status_code: 200
+      register: kibana_status
+      until: kibana_status.status == 200
+      retries: 30
+      delay: 10
 
     - name: Display ELK access information
       debug:
         msg: |
           ELK Stack is now accessible at:
-          Elasticsearch: http://10.128.0.19:9200
-          Kibana: http://10.128.0.19:5601
-          Logstash: http://10.128.0.19:9600
+          Elasticsearch: http://{{ ansible_default_ipv4.address }}:9200
+          Kibana: http://{{ ansible_default_ipv4.address }}:5601
+          Logstash: http://{{ ansible_default_ipv4.address }}:9600
+          
+          External access (formie VM):
+          Elasticsearch: http://34.41.228.106:9200
+          Kibana: http://34.41.228.106:5601
           
           Logstash will process forensics data from /data/processed/

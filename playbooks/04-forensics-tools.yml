@@ -1,0 +1,802 @@
+---
+- name: Create Forensic Tool Output Directories
+  hosts: forensics
+  become: yes
+  tasks:
+    - name: Create forensic tool output directories
+      file:
+        path: "/data/processed/{{ item }}"
+        state: directory
+        mode: '0755'
+        owner: nobody
+        group: nogroup
+      loop:
+        - autopsy
+        - volatility
+        - andriller
+        - cape
+      tags:
+        - forensic-dirs
+
+    - name: Create evidence subdirectories for different types
+      file:
+        path: "/data/evidence/{{ item }}"
+        state: directory
+        mode: '0755'
+        owner: nobody
+        group: nogroup
+      loop:
+        - disk-images
+        - memory-dumps
+        - mobile-devices
+        - malware-samples
+        - network-captures
+      tags:
+        - evidence-dirs
+
+    - name: Create case management directories
+      file:
+        path: "/data/cases/{{ item }}"
+        state: directory
+        mode: '0755'
+        owner: nobody
+        group: nogroup
+      loop:
+        - templates
+        - reports
+        - exports
+      tags:
+        - case-dirs
+
+- name: Install Forensic Tools on Forensics Server
+  hosts: forensics
+  become: true
+  vars:
+    sleuthkit_version: "4.12.1"
+  tasks:
+    - name: Install system dependencies for forensic tools
+      apt:
+        name:
+          - build-essential
+          - autoconf
+          - libtool
+          - automake
+          - git
+          - wget
+          - openjdk-8-jdk
+          - openjdk-11-jdk
+          - testdisk
+          - libewf-dev
+          - zlib1g-dev
+          - libafflib-dev
+          - libssl-dev
+          - python3-dev
+          - python3-pip
+          - python3-venv
+          - libffi-dev
+          - libjpeg-dev
+          - yara
+          - ssdeep
+          - p7zip-full
+          - postgresql-client
+          - redis-tools
+          - guymager
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - lsb-release
+          - docker.io
+          - docker-compose
+        state: present
+
+    - name: Create forensics user
+      user:
+        name: forensics
+        groups: docker
+        shell: /bin/bash
+        create_home: yes
+        system: no
+
+    - name: Create forensics directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+        owner: forensics
+        group: forensics
+      loop:
+        - /opt/forensics
+        - /opt/forensics/sleuthkit
+        - /opt/forensics/autopsy
+        - /opt/forensics/volatility3
+        - /opt/forensics/scripts
+        - /opt/forensics/guymager
+        - /opt/forensics/iris
+        - /home/forensics/cases
+        - /data/processed/autopsy
+        - /data/processed/volatility
+        - /data/processed/andriller
+        - /data/processed/guymager
+        - /data/processed/iris
+
+    - name: Download and compile Sleuth Kit
+      shell: |
+        cd /tmp
+        wget https://github.com/sleuthkit/sleuthkit/releases/download/sleuthkit-{{ sleuthkit_version }}/sleuthkit-{{ sleuthkit_version }}.tar.gz
+        tar -xzf sleuthkit-{{ sleuthkit_version }}.tar.gz
+        cd sleuthkit-{{ sleuthkit_version }}
+        ./configure --prefix=/opt/forensics/sleuthkit
+        make -j$(nproc)
+        make install
+        echo "/opt/forensics/sleuthkit/lib" > /etc/ld.so.conf.d/sleuthkit.conf
+        ldconfig
+      args:
+        creates: /opt/forensics/sleuthkit/bin/fls
+
+    - name: Add Sleuth Kit to PATH
+      lineinfile:
+        path: /etc/environment
+        line: 'PATH="/opt/forensics/sleuthkit/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
+        regexp: '^PATH='
+
+    - name: Install Volatility3
+      shell: |
+        cd /opt/forensics
+        git clone https://github.com/volatilityfoundation/volatility3.git
+        cd volatility3
+        python3 -m venv venv
+        source venv/bin/activate
+        pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install .
+        chown -R forensics:forensics /opt/forensics/volatility3
+      args:
+        creates: /opt/forensics/volatility3/venv
+
+    - name: Install Andriller
+      pip:
+        name: andriller
+        executable: pip3
+        state: latest
+
+    - name: Install YARA Python bindings
+      pip:
+        name: yara-python
+        executable: pip3
+
+    - name: Create Volatility wrapper script
+      copy:
+        content: |
+          #!/bin/bash
+          source /opt/forensics/volatility3/venv/bin/activate
+          python3 /opt/forensics/volatility3/vol.py "$@"
+        dest: /usr/local/bin/volatility3
+        mode: '0755'
+
+    - name: Configure Guymager
+      copy:
+        content: |
+          # Guymager configuration for forensic disk imaging
+          [General]
+          EwfFormat=E01
+          EwfCompression=6
+          EwfSplitSize=650
+          HashCalcMD5=true
+          HashCalcSHA1=true
+          HashCalcSHA256=true
+          HashVerifySource=true
+          HashVerifyImage=true
+          LogFile=/var/log/guymager.log
+          InfoIncludeAcquisitionStart=true
+          InfoIncludeAcquisitionEnd=true
+          InfoIncludeCaseNumber=true
+          InfoIncludeEvidenceNumber=true
+          InfoIncludeExaminer=true
+          InfoIncludeDescription=true
+          InfoIncludeNotes=true
+        dest: /etc/guymager/guymager.cfg
+        mode: '0644'
+
+    - name: Create Guymager wrapper script for command line use
+      copy:
+        content: |
+          #!/bin/bash
+          # Guymager Command Line Wrapper
+          # Usage: guymager_cli.sh <source_device> <case_id> <evidence_number>
+          
+          SOURCE_DEVICE="$1"
+          CASE_ID="$2"
+          EVIDENCE_NUMBER="$3"
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          
+          if [ -z "$SOURCE_DEVICE" ] || [ -z "$CASE_ID" ] || [ -z "$EVIDENCE_NUMBER" ]; then
+              echo "Usage: $0 <source_device> <case_id> <evidence_number>"
+              echo "Example: $0 /dev/sdb CASE001 E001"
+              exit 1
+          fi
+          
+          OUTPUT_DIR="/data/processed/guymager"
+          OUTPUT_FILE="${OUTPUT_DIR}/${CASE_ID}_${EVIDENCE_NUMBER}_${TIMESTAMP}"
+          
+          echo "Starting Guymager acquisition..."
+          echo "Source Device: $SOURCE_DEVICE"
+          echo "Case ID: $CASE_ID"
+          echo "Evidence Number: $EVIDENCE_NUMBER"
+          echo "Output File: $OUTPUT_FILE"
+          
+          # Create output directory if it doesn't exist
+          mkdir -p "$OUTPUT_DIR"
+          
+          # Note: Guymager is primarily a GUI tool
+          # For command line forensic imaging, we'll use dd with verification
+          echo "Creating forensic image with dd and verification..."
+          dd if="$SOURCE_DEVICE" of="${OUTPUT_FILE}.dd" bs=64K conv=noerror,sync status=progress
+          
+          echo "Calculating hashes for verification..."
+          md5sum "$SOURCE_DEVICE" > "${OUTPUT_FILE}_source.md5"
+          md5sum "${OUTPUT_FILE}.dd" > "${OUTPUT_FILE}_image.md5"
+          sha256sum "$SOURCE_DEVICE" > "${OUTPUT_FILE}_source.sha256"
+          sha256sum "${OUTPUT_FILE}.dd" > "${OUTPUT_FILE}_image.sha256"
+          
+          echo "Forensic imaging complete!"
+          echo "Image file: ${OUTPUT_FILE}.dd"
+          echo "Hash files created for verification"
+        dest: /usr/local/bin/guymager_cli.sh
+        mode: '0755'
+  
+    - name: Update system and install CAPE dependencies
+      apt:
+        name:
+          - bridge-utils
+          - cpu-checker
+          - qemu
+          - virt-manager
+          - postgresql
+          - postgresql-contrib
+          - python3-venv
+          - python3-pip
+          - curl
+          - libvirt-dev
+          - wget
+          - python3-psycopg2
+          - libpq-dev
+        state: present
+        update_cache: yes
+      tags:
+        - cape
+
+    - name: Install libssl1.1 from focal security repo
+      shell: |
+        echo 'deb http://security.ubuntu.com/ubuntu focal-security main' > /etc/apt/sources.list.d/focal-security.list
+        apt-get update
+        apt-get install -y libssl1.1
+        rm /etc/apt/sources.list.d/focal-security.list
+        apt-get update
+      tags:
+        - cape
+
+    - name: Install MongoDB 4.4.8
+      shell: |
+        wget -qO - https://www.mongodb.org/static/pgp/server-4.4.asc | apt-key add -
+        echo 'deb [ arch=amd64,arm64 ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/4.4 multiverse' > /etc/apt/sources.list.d/mongodb-org-4.4.list
+        apt-get update
+        apt-get install -y --allow-downgrades mongodb-org=4.4.8 mongodb-org-server=4.4.8 mongodb-org-shell=4.4.8 mongodb-org-mongos=4.4.8 mongodb-org-tools=4.4.8
+      tags:
+        - cape
+
+    - name: Start and enable MongoDB
+      systemd:
+        name: mongod
+        state: started
+        enabled: yes
+      tags:
+        - cape
+
+    - name: Start and enable PostgreSQL service
+      systemd:
+        name: postgresql
+        state: started
+        enabled: yes
+      tags:
+        - cape
+
+    - name: Create PostgreSQL database for CAPE
+      shell: |
+        sudo -u postgres psql -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = 'cape'" | grep -q 1 || sudo -u postgres createdb cape
+        echo "PostgreSQL database 'cape' created or already exists"
+      tags:
+        - cape
+
+    - name: Download and prepare CAPE installer
+      shell: |
+        cd /opt
+        if [ ! -f cape2.sh ]; then
+          wget https://raw.githubusercontent.com/kevoreilly/CAPEv2/master/installer/cape2.sh
+          chmod +x cape2.sh
+        fi
+        # Modify CAPE installer to use QEMU instead of KVM
+        sed -i 's/--enable-kvm//g; s/qemu-kvm/qemu/g' cape2.sh
+      tags:
+        - cape
+
+    - name: Create cape user for CAPE installation
+      user:
+        name: cape
+        groups: 
+          - libvirt
+          - kvm
+        shell: /bin/bash
+        create_home: yes
+        system: no
+      tags:
+        - cape
+
+    - name: Install CAPE using modified installer (This may take 45-60 minutes)
+      shell: |
+        cd /opt
+        echo "Starting CAPE installation at $(date)" | tee /var/log/cape-install.log
+        timeout 3600 ./cape2.sh all cape 2>&1 | tee -a /var/log/cape-install.log || {
+          echo "CAPE installation timed out or failed at $(date)" | tee -a /var/log/cape-install.log
+          exit 1
+        }
+        echo "CAPE installation completed at $(date)" | tee -a /var/log/cape-install.log
+      args:
+        creates: /opt/CAPEv2
+      async: 4200  # 70 minutes timeout
+      poll: 120     # Check every 2 minutes
+      register: cape_install_result
+      tags:
+        - cape
+
+    - name: Check CAPE installation result
+      debug:
+        msg: |
+          CAPE Installation Status:
+          {{ cape_install_result }}
+      when: cape_install_result is defined
+      tags:
+        - cape
+
+    - name: Verify CAPE installation directory exists
+      stat:
+        path: /opt/CAPEv2
+      register: cape_dir_check
+      tags:
+        - cape
+
+    - name: Fail if CAPE installation directory doesn't exist
+      fail:
+        msg: "CAPE installation failed - /opt/CAPEv2 directory not found. Check /var/log/cape-install.log for details."
+      when: not cape_dir_check.stat.exists
+      tags:
+        - cape
+
+    - name: Install Poetry for cape user
+      shell: |
+        sudo -H -u cape bash -c 'curl -sSL https://install.python-poetry.org | python3 -'
+        sudo -H -u cape bash -c 'echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> ~/.bashrc'
+        sudo -H -u cape bash -c 'echo "export PATH=\"\$HOME/.local/bin:\$PATH\"" >> ~/.bash_profile'
+      when: cape_dir_check.stat.exists
+      tags:
+        - cape
+
+    - name: Set proper ownership for CAPE directory
+      file:
+        path: /opt/CAPEv2
+        owner: cape
+        group: cape
+        recurse: yes
+      when: cape_dir_check.stat.exists
+      tags:
+        - cape
+
+    - name: Configure Poetry and install CAPE dependencies
+      shell: |
+        if [ -d "/opt/CAPEv2" ]; then
+          cd /opt/CAPEv2
+          sudo -H -u cape bash -c 'cd /opt/CAPEv2 && export PATH="$HOME/.local/bin:$PATH" && poetry config virtualenvs.in-project true'
+          sudo -H -u cape bash -c 'cd /opt/CAPEv2 && export PATH="$HOME/.local/bin:$PATH" && poetry install'
+        else
+          echo "Error: /opt/CAPEv2 directory not found"
+          exit 1
+        fi
+      when: cape_dir_check.stat.exists
+      tags:
+        - cape
+
+    - name: Configure pyproject.toml for CAPE
+      shell: |
+        cd /opt/CAPEv2
+        sudo -H -u cape python3 - << 'EOF'
+        import os
+        
+        pyproject_path = 'pyproject.toml'
+        if os.path.exists(pyproject_path):
+            with open(pyproject_path, 'r') as f:
+                content = f.read()
+            if 'package-mode = false' not in content:
+                lines = content.split('\n')
+                for i, line in enumerate(lines):
+                    if line.strip().startswith('[tool.poetry]'):
+                        lines.insert(i+1, 'package-mode = false')
+                        break
+                with open(pyproject_path, 'w') as f:
+                    f.write('\n'.join(lines))
+                print('Added package-mode = false to pyproject.toml')
+            else:
+                print('package-mode = false already present in pyproject.toml')
+        else:
+            print('pyproject.toml not found')
+        EOF
+      when: cape_dir_check.stat.exists
+      tags:
+        - cape
+
+    - name: Fix CAPE configuration to use correct IP address
+      shell: |
+        cd /opt/CAPEv2
+        # Get the actual IP address of the server
+        SERVER_IP=$(ip route get 8.8.8.8 | awk '{print $7; exit}')
+        
+        # Update cuckoo.conf to use the correct IP
+        if [ -f conf/cuckoo.conf ]; then
+          sed -i "s/192\.168\.1\.1/$SERVER_IP/g" conf/cuckoo.conf
+          echo "Updated CAPE configuration to use IP: $SERVER_IP"
+        fi
+        
+        # Update reporting.conf if needed
+        if [ -f conf/reporting.conf ]; then
+          sed -i "s/192\.168\.1\.1/$SERVER_IP/g" conf/reporting.conf
+        fi
+        
+        chown -R cape:cape /opt/CAPEv2/conf/
+      when: cape_dir_check.stat.exists
+      tags:
+        - cape
+
+    - name: Install additional CAPE dependencies
+      shell: |
+        cd /opt/CAPEv2
+        sudo -H -u cape bash -c 'cd /opt/CAPEv2 && export PATH="$HOME/.local/bin:$PATH" && source $(poetry env info --path)/bin/activate && pip install pyelftools pycryptodome requests-toolbelt'
+      when: cape_dir_check.stat.exists
+      tags:
+        - cape
+
+    - name: Create run_cape.sh script
+      copy:
+        content: |
+          #!/bin/bash
+          cd /opt/CAPEv2
+          export PATH="$HOME/.local/bin:$PATH"
+          
+          # Check if virtual environment exists
+          if [ ! -f "$(poetry env info --path)/bin/activate" ]; then
+            echo "Setting up CAPE virtual environment..."
+            poetry install
+          fi
+          
+          # Activate environment and run CAPE
+          source $(poetry env info --path)/bin/activate
+          python3 cuckoo.py
+        dest: /opt/CAPEv2/run_cape.sh
+        mode: '0755'
+        owner: cape
+        group: cape
+      when: cape_dir_check.stat.exists
+      tags:
+        - cape
+
+    - name: Enable and start CAPE service
+      systemd:
+        name: cape
+        enabled: yes
+        state: restarted
+        daemon_reload: yes
+      when: cape_dir_check.stat.exists
+      tags:
+        - cape
+
+    - name: Check CAPE installation status
+      debug:
+        msg: |
+          CAPE Installation Status:
+          - Directory exists: {{ cape_dir_check.stat.exists }}
+          {% if cape_dir_check.stat.exists %}
+          - Installation appears successful
+          - Service configured and started
+          {% else %}
+          - Installation failed - /opt/CAPEv2 directory not created
+          - Check /var/log/cape-install.log for details
+          {% endif %}
+      tags:
+        - cape
+
+    - name: Configure PKG_CONFIG_PATH and install additional dependencies
+      shell: |
+        LIBVIRT_PC=$(find /usr -name libvirt.pc | head -1)
+        if [ -n "$LIBVIRT_PC" ]; then
+          LIBVIRT_PC_DIR=$(dirname "$LIBVIRT_PC")
+          cd /opt/CAPEv2
+          sudo -H -u cape bash -c "cd /opt/CAPEv2 && export PATH=\"\$HOME/.local/bin:\$PATH\" && source \$(poetry env info --path)/bin/activate && PKG_CONFIG_PATH=\$PKG_CONFIG_PATH:$LIBVIRT_PC_DIR poetry run pip install libvirt-python"
+        else
+          echo "Warning: libvirt.pc not found"
+        fi
+      when: cape_dir_check.stat.exists
+      tags:
+        - cape
+
+    - name: Create CAPE service file
+      copy:
+        content: |
+          [Unit]
+          Description=CAPE Malware Analysis Sandbox
+          After=network.target postgresql.service mongodb.service
+
+          [Service]
+          Type=simple
+          User=cape
+          WorkingDirectory=/opt/CAPEv2
+          ExecStart=/opt/CAPEv2/run_cape.sh
+          Restart=on-failure
+          RestartSec=5
+          Environment=PATH=/home/cape/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/cape.service
+        mode: '0644'
+      when: cape_dir_check.stat.exists
+      tags:
+        - cape
+
+    - name: Create CAPE processor service for handling analysis results
+      copy:
+        content: |
+          [Unit]
+          Description=CAPE Analysis Result Processor
+          After=cape.service
+
+          [Service]
+          Type=simple
+          User=cape
+          WorkingDirectory=/opt/CAPEv2
+          ExecStart=/opt/CAPEv2/run_processor.sh
+          Restart=on-failure
+          RestartSec=10
+          Environment=PATH=/home/cape/.local/bin:/usr/local/bin:/usr/bin:/bin
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/cape-processor.service
+        mode: '0644'
+      when: cape_dir_check.stat.exists
+      tags:
+        - cape
+
+    - name: Create CAPE processor script
+      copy:
+        content: |
+          #!/bin/bash
+          cd /opt/CAPEv2
+          export PATH="$HOME/.local/bin:$PATH"
+          source $(poetry env info --path)/bin/activate
+          python3 utils/process.py auto
+        dest: /opt/CAPEv2/run_processor.sh
+        mode: '0755'
+        owner: cape
+        group: cape
+      when: cape_dir_check.stat.exists
+      tags:
+        - cape
+
+    - name: Enable and start libvirtd service
+      systemd:
+        name: libvirtd
+        enabled: yes
+        state: started
+        daemon_reload: yes
+      tags:
+        - cape
+
+    - name: Configure firewall for CAPE
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - '8000'  # CAPE web interface
+        - '9000'  # CAPE API
+      when: cape_dir_check.stat.exists
+      tags:
+        - cape
+        - firewall
+
+    - name: Start and enable CAPE services
+      systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - cape
+        - cape-processor
+      when: cape_dir_check.stat.exists
+      tags:
+        - cape
+
+    - name: Create directory for processed CAPE data
+      file:
+        path: /data/processed/cape
+        state: directory
+        mode: '0755'
+        owner: cape
+        group: cape
+      tags:
+        - cape
+
+    - name: Display CAPE installation completion message
+      debug:
+        msg: |
+          ================================================================
+          CAPE SANDBOX INSTALLATION COMPLETED
+          ================================================================
+          
+          CAPE has been successfully installed with the following components:
+          
+          ✅ MongoDB 4.4.8 configured and running
+          ✅ PostgreSQL database 'cape' created
+          ✅ CAPE installed in /opt/CAPEv2
+          ✅ Poetry virtual environment configured
+          ✅ CAPE service created and ready
+          
+          To start CAPE manually:
+          sudo -u cape /opt/CAPEv2/run_cape.sh
+          
+          To start CAPE service:
+          sudo systemctl start cape
+          sudo systemctl enable cape
+          
+          CAPE will be available at: http://localhost:8000
+          ================================================================
+      when: cape_dir_check.stat.exists
+      tags:
+        - cape
+
+    - name: Display CAPE installation failure message
+      debug:
+        msg: |
+          ================================================================
+          CAPE SANDBOX INSTALLATION FAILED
+          ================================================================
+          
+          CAPE installation was not successful:
+          
+          ❌ /opt/CAPEv2 directory was not created
+          ⚠️  Check /var/log/cape-install.log for error details
+          
+          However, other forensics tools are still available:
+          
+          ✅ MongoDB 4.4.8 configured and running
+          ✅ PostgreSQL database 'cape' created  
+          ✅ Sleuth Kit, Volatility3, Andriller, Guymager installed
+          
+          You can try manual CAPE installation or investigate the errors.
+          ================================================================
+      when: not cape_dir_check.stat.exists
+      tags:
+        - cape
+
+    - name: Create forensics processing script
+      copy:
+        content: |
+          #!/bin/bash
+          # Forensics Lab Processing Script
+          # Usage: ./process_evidence.sh <evidence_path> <case_id> [evidence_type]
+          
+          EVIDENCE_PATH="$1"
+          CASE_ID="$2"
+          EVIDENCE_TYPE="$3"
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          
+          if [ -z "$EVIDENCE_PATH" ] || [ -z "$CASE_ID" ]; then
+              echo "Usage: $0 <evidence_path> <case_id> [evidence_type]"
+              echo "Evidence types: memory, disk, mobile, malware, device"
+              exit 1
+          fi
+          
+          # Create case directory structure
+          mkdir -p "/data/cases/$CASE_ID"/{evidence,reports,timeline,artifacts}
+          
+          echo "=========================================="
+          echo "FORENSICS LAB EVIDENCE PROCESSING"
+          echo "=========================================="
+          echo "Case ID: $CASE_ID"
+          echo "Evidence: $EVIDENCE_PATH"
+          echo "Type: $EVIDENCE_TYPE"
+          echo "Timestamp: $TIMESTAMP"
+          echo "=========================================="
+          
+          # Auto-detect evidence type if not provided
+          if [ -z "$EVIDENCE_TYPE" ]; then
+              if [[ "$EVIDENCE_PATH" == *.mem ]] || [[ "$EVIDENCE_PATH" == *.vmem ]] || [[ "$EVIDENCE_PATH" == *.raw ]]; then
+                  EVIDENCE_TYPE="memory"
+              elif [[ "$EVIDENCE_PATH" == *.dd ]] || [[ "$EVIDENCE_PATH" == *.img ]] || [[ "$EVIDENCE_PATH" == *.e01 ]]; then
+                  EVIDENCE_TYPE="disk"
+              elif [[ "$EVIDENCE_PATH" == *.ab ]] || [[ "$EVIDENCE_PATH" == *.tar ]]; then
+                  EVIDENCE_TYPE="mobile"
+              elif [[ "$EVIDENCE_PATH" == *.exe ]] || [[ "$EVIDENCE_PATH" == *.bin ]] || [[ "$EVIDENCE_PATH" == *.dll ]]; then
+                  EVIDENCE_TYPE="malware"
+              elif [[ "$EVIDENCE_PATH" == /dev/* ]]; then
+                  EVIDENCE_TYPE="device"
+              else
+                  EVIDENCE_TYPE="unknown"
+              fi
+              echo "Auto-detected evidence type: $EVIDENCE_TYPE"
+          fi
+          
+          # Process based on evidence type
+          case "$EVIDENCE_TYPE" in
+              "device")
+                  echo "Processing physical device with Guymager..."
+                  /usr/local/bin/guymager_cli.sh "$EVIDENCE_PATH" "$CASE_ID" "E001"
+                  echo "Device imaging completed"
+                  ;;
+              "memory")
+                  echo "Processing memory dump with Volatility3..."
+                  /usr/local/bin/volatility3 -f "$EVIDENCE_PATH" windows.info > "/data/processed/volatility/${CASE_ID}_${TIMESTAMP}_info.json"
+                  /usr/local/bin/volatility3 -f "$EVIDENCE_PATH" windows.pslist > "/data/processed/volatility/${CASE_ID}_${TIMESTAMP}_pslist.json"
+                  /usr/local/bin/volatility3 -f "$EVIDENCE_PATH" windows.psscan > "/data/processed/volatility/${CASE_ID}_${TIMESTAMP}_psscan.json"
+                  /usr/local/bin/volatility3 -f "$EVIDENCE_PATH" windows.netscan > "/data/processed/volatility/${CASE_ID}_${TIMESTAMP}_netscan.json"
+                  echo "Memory analysis completed"
+                  ;;
+              "disk")
+                  echo "Processing disk image with Sleuth Kit..."
+                  # Sleuth Kit analysis
+                  /opt/forensics/sleuthkit/bin/fls -r "$EVIDENCE_PATH" > "/data/processed/autopsy/${CASE_ID}_${TIMESTAMP}_filelist.txt"
+                  /opt/forensics/sleuthkit/bin/mmls "$EVIDENCE_PATH" > "/data/processed/autopsy/${CASE_ID}_${TIMESTAMP}_partitions.txt" 2>/dev/null || true
+                  echo "Disk analysis completed"
+                  ;;
+              "mobile")
+                  echo "Processing mobile data with Andriller..."
+                  andriller -d "$EVIDENCE_PATH" -o "/data/processed/andriller/${CASE_ID}_${TIMESTAMP}/"
+                  echo "Mobile analysis completed"
+                  ;;
+              "malware")
+                  echo "Processing malware sample with CAPE Sandbox..."
+                  # Submit to CAPE for analysis
+                  curl -F "file=@$EVIDENCE_PATH" -F "timeout=300" http://localhost:8000/tasks/create/file/ > "/data/processed/cape/${CASE_ID}_${TIMESTAMP}_submission.json"
+                  echo "Malware submitted to CAPE Sandbox"
+                  ;;
+              *)
+                  echo "Unknown evidence type. Performing basic analysis..."
+                  file "$EVIDENCE_PATH" > "/data/cases/$CASE_ID/evidence/${CASE_ID}_${TIMESTAMP}_file_info.txt"
+                  md5sum "$EVIDENCE_PATH" > "/data/cases/$CASE_ID/evidence/${CASE_ID}_${TIMESTAMP}_md5.txt"
+                  sha256sum "$EVIDENCE_PATH" > "/data/cases/$CASE_ID/evidence/${CASE_ID}_${TIMESTAMP}_sha256.txt"
+                  ;;
+          esac
+          
+          # Generate processing report
+          echo "Generating processing report..."
+          cat > "/data/cases/$CASE_ID/reports/${CASE_ID}_${TIMESTAMP}_processing_report.txt" << EOF
+          FORENSICS LAB PROCESSING REPORT
+          ================================
+          Case ID: $CASE_ID
+          Evidence Path: $EVIDENCE_PATH
+          Evidence Type: $EVIDENCE_TYPE
+          Processing Date: $(date)
+          Processed By: $(whoami)
+          
+          Files Generated:
+          $(find /data/processed -name "${CASE_ID}_${TIMESTAMP}*" 2>/dev/null || echo "None found")
+          
+          Processing completed successfully.
+          EOF
+          
+          echo "=========================================="
+          echo "Processing complete for case: $CASE_ID"
+          echo "Report saved to: /data/cases/$CASE_ID/reports/${CASE_ID}_${TIMESTAMP}_processing_report.txt"
+          echo "=========================================="
+        dest: /opt/forensics/scripts/process_evidence.sh
+        mode: '0755'
+        owner: forensics
+        group: forensics

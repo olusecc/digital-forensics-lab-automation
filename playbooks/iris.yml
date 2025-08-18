@@ -1,6 +1,6 @@
 ---
 - name: Install Fresh DFIR-IRIS Case Management System
-  hosts: data_services
+  hosts: forensics
   become: yes
   tasks:
     - name: Stop IRIS containers only
@@ -328,7 +328,7 @@
           IRIS Response Code: {{ iris_test.status }}
           
           DFIR-IRIS is now accessible at:
-          - Internal: https://10.128.0.19:443
+          - Internal: https://10.128.0.11:443
           - External: https://{{ ansible_default_ipv4.address }}:443
           
           ADMIN USER READY FOR ACCESS:

@@ -1,0 +1,17 @@
+[Unit]
+Description=CAPE Sandbox Service
+After=network.target
+
+[Service]
+Type=simple
+User=cape
+Group=cape
+WorkingDirectory=/opt/CAPEv2
+ExecStart=/opt/CAPEv2/run_cape.sh
+Restart=always
+RestartSec=3
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=CAPE_HOME=/opt/CAPEv2
+
+[Install]
+WantedBy=multi-user.target

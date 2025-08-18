@@ -1,0 +1,1278 @@
+---
+# Jenkins Forensics Automation Engine Deployment
+# This playbook deploys Jenkins with forensic-specific configuration
+- name: Deploy Jenkins for Digital Forensics Automation
+  hosts: management
+  become: yes
+  vars:
+    jenkins_admin_user: "admin"
+    jenkins_admin_password: "ForensicsLab2025!"
+    jenkins_port: 8080
+    jenkins_plugins:
+      - workflow-aggregator
+      - pipeline-stage-view
+      - blueocean
+      - git
+      - github
+      - slack
+      - email-ext
+      - build-timeout
+      - timestamper
+      - ws-cleanup
+      - ant
+      - gradle
+      - pipeline-utility-steps
+      - http_request
+      - json-path
+      - file-operations
+      - copyartifact
+      - parameterized-trigger
+      - matrix-auth
+      - ldap
+      - role-strategy
+      - audit-trail
+      - jobConfigHistory
+      - build-monitor-plugin
+      - dashboard-view
+    
+  tasks:
+    - name: Update system packages
+      apt:
+        update_cache: yes
+        upgrade: dist
+
+    - name: Install Java 21 (required for Jenkins)
+      apt:
+        name:
+          - openjdk-21-jdk
+          - curl
+          - wget
+          - gnupg2
+          - software-properties-common
+          - ca-certificates
+          - lsb-release
+          - python3
+          - python3-pip
+          - python3-venv
+          - git
+          - unzip
+          - p7zip-full
+          - file
+          - xxd
+          - binutils
+          - bsdmainutils
+        state: present
+
+    - name: Create keyrings directory
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download Jenkins GPG key
+      get_url:
+        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+        dest: /etc/apt/keyrings/jenkins.asc
+        mode: '0644'
+
+    - name: Add Jenkins repository
+      apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/jenkins.asc] https://pkg.jenkins.io/debian-stable binary/"
+        state: present
+        filename: jenkins
+        update_cache: yes
+
+    - name: Install Jenkins
+      apt:
+        name: jenkins
+        state: present
+
+    - name: Create Jenkins directories for forensics
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: '0755'
+      loop:
+        - /var/lib/jenkins/forensics
+        - /var/lib/jenkins/forensics/evidence
+        - /var/lib/jenkins/forensics/reports
+        - /var/lib/jenkins/forensics/scripts
+        - /var/lib/jenkins/forensics/pipelines
+        - /var/lib/jenkins/forensics/templates
+
+    - name: Configure Jenkins with increased memory
+      lineinfile:
+        path: /etc/default/jenkins
+        regexp: '^JAVA_ARGS='
+        line: 'JAVA_ARGS="-Djava.awt.headless=true -Xmx2048m -Xms1024m"'
+        backup: yes
+
+    - name: Configure Jenkins port
+      lineinfile:
+        path: /etc/default/jenkins
+        regexp: '^HTTP_PORT='
+        line: 'HTTP_PORT={{ jenkins_port }}'
+        backup: yes
+
+    - name: Configure Jenkins to listen on all interfaces
+      lineinfile:
+        path: /etc/default/jenkins
+        regexp: '^JENKINS_ARGS='
+        line: 'JENKINS_ARGS="--webroot=/var/cache/$NAME/war --httpPort=$HTTP_PORT --httpListenAddress=0.0.0.0"'
+        backup: yes
+
+    - name: Start and enable Jenkins
+      systemd:
+        name: jenkins
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Wait for Jenkins to start
+      wait_for:
+        port: "{{ jenkins_port }}"
+        host: localhost
+        delay: 30
+        timeout: 300
+
+    - name: Check if Jenkins is already running and needs restart for network binding
+      shell: netstat -tlnp | grep :8080 | grep "127.0.0.1\|localhost" || echo "not_localhost_only"
+      register: jenkins_binding_check
+      ignore_errors: yes
+
+    - name: Restart Jenkins if needed to apply network binding changes
+      systemd:
+        name: jenkins
+        state: restarted
+      when: jenkins_binding_check.stdout != "not_localhost_only"
+
+    - name: Wait for Jenkins to restart if it was restarted
+      wait_for:
+        port: "{{ jenkins_port }}"
+        host: localhost
+        delay: 15
+        timeout: 300
+      when: jenkins_binding_check.stdout != "not_localhost_only"
+
+    - name: Create Jenkins automated setup script
+      copy:
+        content: |
+          #!/bin/bash
+          # Skip the initial setup wizard
+          echo "2.479.1" > /var/lib/jenkins/jenkins.install.InstallUtil.lastExecVersion
+          echo "2.479.1" > /var/lib/jenkins/jenkins.install.UpgradeWizard.state
+          mkdir -p /var/lib/jenkins/plugins
+          mkdir -p /var/lib/jenkins/init.groovy.d
+          
+          # Create Groovy script to setup admin user
+          cat > /var/lib/jenkins/init.groovy.d/basic-security.groovy << 'EOF'
+          #!groovy
+          
+          import jenkins.model.*
+          import hudson.security.*
+          import hudson.security.csrf.DefaultCrumbIssuer
+          import jenkins.security.s2m.AdminWhitelistRule
+          
+          def instance = Jenkins.getInstance()
+          
+          // Create admin user
+          def hudsonRealm = new HudsonPrivateSecurityRealm(false)
+          hudsonRealm.createAccount("{{ jenkins_admin_user }}", "{{ jenkins_admin_password }}")
+          instance.setSecurityRealm(hudsonRealm)
+          
+          // Set authorization strategy
+          def strategy = new FullControlOnceLoggedInAuthorizationStrategy()
+          strategy.setDenyAnonymousReadAccess(true)
+          instance.setAuthorizationStrategy(strategy)
+          
+          // Enable CSRF protection
+          instance.setCrumbIssuer(new DefaultCrumbIssuer(true))
+          
+          // Save configuration
+          instance.save()
+          
+          println "Forensics admin user created successfully"
+          EOF
+          
+          # Create basic configuration with forensics customization
+          cat > /var/lib/jenkins/config.xml << 'EOF'
+          <?xml version='1.1' encoding='UTF-8'?>
+          <hudson>
+            <disabledAdministrativeMonitors/>
+            <version>2.479.1</version>
+            <installStateName>RUNNING</installStateName>
+            <numExecutors>4</numExecutors>
+            <mode>NORMAL</mode>
+            <useSecurity>true</useSecurity>
+            <disableRememberMe>false</disableRememberMe>
+            <projectNamingStrategy class="jenkins.model.ProjectNamingStrategy$DefaultProjectNamingStrategy"/>
+            <workspaceDir>${JENKINS_HOME}/workspace/${ITEM_FULLNAME}</workspaceDir>
+            <buildsDir>${ITEM_ROOTDIR}/builds</buildsDir>
+            <systemMessage>Digital Forensics Lab - Automated Evidence Processing Platform</systemMessage>
+          </hudson>
+          EOF
+          
+          # Set proper ownership
+          chown -R jenkins:jenkins /var/lib/jenkins
+        dest: /tmp/setup_jenkins_forensics.sh
+        mode: '0755'
+
+    - name: Setup Jenkins automated configuration
+      shell: /tmp/setup_jenkins_forensics.sh
+
+    - name: Get Jenkins initial admin password (for reference)
+      slurp:
+        src: /var/lib/jenkins/secrets/initialAdminPassword
+      register: jenkins_initial_password
+
+    - name: Display Jenkins initial setup information
+      debug:
+        msg: |
+          Jenkins Forensics Lab is now running and accessible at:
+          URL: http://{{ ansible_default_ipv4.address }}:{{ jenkins_port }}
+          External URL: http://34.136.254.74:{{ jenkins_port }}
+          
+          AUTOMATED ADMIN USER CREATED:
+          Username: {{ jenkins_admin_user }}
+          Password: {{ jenkins_admin_password }}
+          
+          Original Initial Admin Password (for reference): {{ jenkins_initial_password.content | b64decode | trim }}
+          
+          Jenkins is ready to use! You can now:
+          1. Open Jenkins in your browser at the URL above
+          2. Login with the automated credentials shown above
+          3. Start using the forensics automation pipelines
+          
+          Pipeline library and scripts are deployed and ready!
+
+    - name: Create Jenkins CLI directory
+      file:
+        path: /var/lib/jenkins/cli
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: '0755'
+
+    - name: Check if Jenkins CLI already exists
+      stat:
+        path: /var/lib/jenkins/cli/jenkins-cli.jar
+      register: jenkins_cli_exists
+
+    - name: Download Jenkins CLI
+      get_url:
+        url: "http://localhost:8080/jnlpJars/jenkins-cli.jar"
+        dest: /var/lib/jenkins/cli/jenkins-cli.jar
+        owner: jenkins
+        group: jenkins
+        mode: '0644'
+      when: not jenkins_cli_exists.stat.exists
+      retries: 5
+      delay: 10
+
+    - name: Create forensics pipeline library directory
+      file:
+        path: /var/lib/jenkins/pipeline-library
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: '0755'
+
+    - name: Copy pipeline library files to Jenkins
+      copy:
+        src: "../jenkins-pipeline-library/"
+        dest: /var/lib/jenkins/pipeline-library/
+        owner: jenkins
+        group: jenkins
+        mode: '0644'
+        directory_mode: '0755'
+
+    - name: Copy Jenkinsfiles to Jenkins
+      copy:
+        src: "../jenkinsfiles/"
+        dest: /var/lib/jenkins/forensics/pipelines/
+        owner: jenkins
+        group: jenkins
+        mode: '0644'
+        directory_mode: '0755'
+
+    - name: Copy forensics scripts to Jenkins
+      copy:
+        src: "../files/forensics-scripts/"
+        dest: /var/lib/jenkins/forensics/scripts/
+        owner: jenkins
+        group: jenkins
+        mode: '0755'
+        directory_mode: '0755'
+
+    - name: Restart Jenkins to apply all configurations
+      systemd:
+        name: jenkins
+        state: restarted
+
+    - name: Wait for Jenkins to restart and be ready
+      wait_for:
+        port: "{{ jenkins_port }}"
+        host: localhost
+        delay: 30
+        timeout: 300
+
+    - name: Verify Jenkins is listening on all interfaces
+      shell: netstat -tlnp | grep :8080
+      register: jenkins_port_check
+
+    - name: Display Jenkins port binding information
+      debug:
+        msg: |
+          Jenkins Port Binding Status:
+          {{ jenkins_port_check.stdout }}
+          
+          Jenkins should be listening on :::8080 (IPv6) which includes IPv4 access.
+          If it shows 127.0.0.1:8080 only, there's a binding issue.
+
+    - name: Test Jenkins local accessibility
+      uri:
+        url: "http://localhost:8080/login"
+        method: GET
+        timeout: 10
+      register: jenkins_local_test
+      ignore_errors: yes
+
+    - name: Display Jenkins local test result
+      debug:
+        msg: |
+          Jenkins Local Test: {{ 'SUCCESS - Jenkins is responding locally' if jenkins_local_test.status == 200 else 'FAILED - Jenkins not responding locally' }}
+          {% if jenkins_local_test.status != 200 %}
+          Error: {{ jenkins_local_test.msg if jenkins_local_test.msg is defined else 'Unknown error' }}
+          {% endif %}
+
+    - name: Install NFS client packages
+      package:
+        name: nfs-common
+        state: present
+      become: yes
+
+    - name: Create NFS mount points for evidence processing
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+        owner: jenkins
+        group: jenkins
+      become: yes
+      loop:
+        - /mnt/evidence
+        - /mnt/processed
+        - /var/lib/jenkins/forensics/nfs-evidence
+        - /var/lib/jenkins/forensics/nfs-processed
+
+    - name: Verify NFS mounts are accessible
+      stat:
+        path: "{{ item }}"
+      loop:
+        - /data/evidence
+        - /data/processed
+        - /data/cases
+      register: nfs_mount_status
+
+    - name: Create symbolic links for Jenkins to access NFS shares
+      file:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        state: link
+        force: yes
+      become: yes
+      loop:
+        - { src: "/data/evidence", dest: "/var/lib/jenkins/forensics/nfs-evidence" }
+        - { src: "/data/processed", dest: "/var/lib/jenkins/forensics/nfs-processed" }
+      when: nfs_mount_status.results[0].stat.exists
+
+    - name: Mount evidence NFS share from forensics server
+      mount:
+        path: /mnt/evidence
+        src: "10.128.0.11:/data/evidence"
+        fstype: nfs
+        opts: rw,sync,hard,intr
+        state: mounted
+      become: yes
+      register: nfs_evidence_mount
+
+    - name: Mount processed data NFS share from forensics server
+      mount:
+        path: /mnt/processed
+        src: "10.128.0.11:/data/processed"
+        fstype: nfs
+        opts: rw,sync,hard,intr
+        state: mounted
+      become: yes
+      register: nfs_processed_mount
+
+    - name: Display NFS mount status
+      debug:
+        msg: |
+          NFS Mount Status:
+          - Evidence share: {{ "✅ Mounted" if nfs_evidence_mount.changed else "⚠️ Failed to mount (will use local paths)" }}
+          - Processed share: {{ "✅ Mounted" if nfs_processed_mount.changed else "⚠️ Failed to mount (will use local paths)" }}
+          
+          Note: NFS shares need to be configured on the forensics server first.
+          For now, Jenkins will use local evidence directories.
+
+    - name: Check if Python virtual environment already exists
+      stat:
+        path: /var/lib/jenkins/forensics/forensics-env/bin/activate
+      register: venv_exists
+
+    - name: Create Python virtual environment for forensics scripts
+      shell: |
+        cd /var/lib/jenkins/forensics
+        python3 -m venv forensics-env
+        source forensics-env/bin/activate
+        pip install requests beautifulsoup4 lxml pandas numpy elasticsearch paramiko scp
+      when: not venv_exists.stat.exists
+      become_user: root
+
+    - name: Create forensics integration configuration directory
+      file:
+        path: /var/lib/jenkins/forensics/config
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: '0755'
+
+    - name: Create forensics integration configuration
+      copy:
+        content: |
+          # Forensics Lab Integration Configuration
+          
+          # Server Endpoints (Updated for actual GCP internal IPs)
+          FORENSICS_SERVER=10.128.0.11
+          ELK_SERVER=10.128.0.12
+          JENKINS_SERVER=10.128.0.10
+          
+          # ELK Stack Configuration
+          ELASTICSEARCH_URL=http://10.128.0.12:9200
+          KIBANA_URL=http://10.128.0.12:5601
+          LOGSTASH_HOST=10.128.0.12
+          LOGSTASH_PORT=5044
+          
+          # CAPE Sandbox Configuration  
+          CAPE_HOST=10.128.0.11
+          CAPE_PORT=8000
+          CAPE_API_URL=http://10.128.0.11:8000/apiv2
+          
+          # Tool Paths on Forensics Server
+          VOLATILITY3_PATH=/usr/local/bin/vol
+          SLEUTHKIT_PATH=/usr/local/bin
+          GUYMAGER_PATH=/usr/bin/guymager
+          CAPE_PATH=/opt/CAPEv2
+          
+          # Evidence Processing Paths
+          EVIDENCE_INPUT=/mnt/evidence
+          EVIDENCE_OUTPUT=/mnt/processed
+          REPORTS_OUTPUT=/var/lib/jenkins/forensics/reports
+          
+          # SSH Configuration for remote tool execution
+          FORENSICS_SSH_USER=forensics
+          FORENSICS_SSH_KEY=/var/lib/jenkins/.ssh/forensics_key
+        dest: /var/lib/jenkins/forensics/config/lab.conf
+        owner: jenkins
+        group: jenkins
+        mode: '0640'
+
+    - name: Create SSH directory for Jenkins
+      file:
+        path: /var/lib/jenkins/.ssh
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: '0700'
+
+    - name: Create SSH key for forensics server access
+      openssh_keypair:
+        path: /var/lib/jenkins/.ssh/forensics_key
+        type: rsa
+        size: 2048
+        owner: jenkins
+        group: jenkins
+        mode: '0600'
+
+    - name: Create forensics automation scripts
+      copy:
+        content: |
+          #!/bin/bash
+          # Forensics Lab Automation Script
+          
+          source /var/lib/jenkins/forensics/config/lab.conf
+          source /var/lib/jenkins/forensics/forensics-env/bin/activate
+          
+          # Function to submit sample to CAPE
+          submit_to_cape() {
+              local file_path="$1"
+              local analysis_type="$2"
+              
+              echo "Submitting $file_path to CAPE sandbox..."
+              
+              curl -X POST "$CAPE_API_URL/tasks/create/file/" \
+                  -F "file=@$file_path" \
+                  -F "package=$analysis_type" \
+                  -F "timeout=300" \
+                  -F "priority=1"
+          }
+          
+          # Function to run Volatility3 analysis
+          run_volatility_analysis() {
+              local memory_dump="$1"
+              local output_dir="$2"
+              
+              echo "Running Volatility3 analysis on $memory_dump..."
+              
+              ssh -i "$FORENSICS_SSH_KEY" "$FORENSICS_SSH_USER@$FORENSICS_SERVER" \
+                  "$VOLATILITY3_PATH -f '$memory_dump' windows.info > '$output_dir/vol_info.txt'"
+              
+              ssh -i "$FORENSICS_SSH_KEY" "$FORENSICS_SSH_USER@$FORENSICS_SERVER" \
+                  "$VOLATILITY3_PATH -f '$memory_dump' windows.pslist > '$output_dir/vol_pslist.txt'"
+              
+              ssh -i "$FORENSICS_SSH_KEY" "$FORENSICS_SSH_USER@$FORENSICS_SERVER" \
+                  "$VOLATILITY3_PATH -f '$memory_dump' windows.netscan > '$output_dir/vol_netscan.txt'"
+          }
+          
+          # Function to create disk image with Guymager
+          create_disk_image() {
+              local source_device="$1"
+              local output_path="$2"
+              
+              echo "Creating disk image of $source_device..."
+              
+              ssh -i "$FORENSICS_SSH_KEY" "$FORENSICS_SSH_USER@$FORENSICS_SERVER" \
+                  "sudo $GUYMAGER_PATH --source='$source_device' --target='$output_path' --format=dd"
+          }
+          
+          # Function to send results to ELK
+          send_to_elk() {
+              local json_file="$1"
+              local index_name="$2"
+              
+              echo "Sending results to Elasticsearch..."
+              
+              curl -X POST "$ELASTICSEARCH_URL/$index_name/_doc" \
+                  -H "Content-Type: application/json" \
+                  -d "@$json_file"
+          }
+          
+          # Main execution
+          case "$1" in
+              cape)
+                  submit_to_cape "$2" "$3"
+                  ;;
+              volatility)
+                  run_volatility_analysis "$2" "$3"
+                  ;;
+              disk-image)
+                  create_disk_image "$2" "$3"
+                  ;;
+              elk-submit)
+                  send_to_elk "$2" "$3"
+                  ;;
+              *)
+                  echo "Usage: $0 {cape|volatility|disk-image|elk-submit} [args...]"
+                  exit 1
+                  ;;
+          esac
+        dest: /var/lib/jenkins/forensics/scripts/forensics-automation.sh
+        owner: jenkins
+        group: jenkins
+        mode: '0755'
+
+    - name: Display firewall information (GCP uses Google Cloud Firewall, not UFW)
+      debug:
+        msg: |
+          Note: This is a GCP VM - firewall rules are managed via Google Cloud Firewall.
+          Jenkins port 8080 should be accessible if the GCP firewall rule 'jenkins-server' is configured.
+          Current Jenkins configuration:
+          - Port: {{ jenkins_port }}
+          - Service Status: Jenkins should be running and accessible
+          
+          To verify external access, ensure the GCP firewall rule allows traffic on port 8080.
+
+    - name: Check if VM has jenkins network tag
+      shell: 'curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/tags | grep -q jenkins || echo "jenkins tag missing"'
+      register: jenkins_tag_check
+      ignore_errors: yes
+
+    - name: Display network tag status
+      debug:
+        msg: |
+          Network Tag Check: {{ jenkins_tag_check.stdout if jenkins_tag_check.stdout else 'jenkins tag appears to be present' }}
+          
+          If Jenkins is not accessible externally, you may need to add the 'jenkins' network tag to this VM:
+          gcloud compute instances add-tags vm-formgt --tags=jenkins --zone=us-central1-a
+          
+          And ensure the firewall rule exists:
+          gcloud compute firewall-rules list --filter="name~jenkins"
+
+    - name: Create Jenkins backup directory
+      file:
+        path: /backup/jenkins
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: '0755'
+
+    - name: Check if Jenkins maintenance script already exists
+      stat:
+        path: /usr/local/bin/jenkins-forensics-maintenance
+      register: maintenance_script_exists
+
+    - name: Create Jenkins maintenance script
+      copy:
+        content: |
+          #!/bin/bash
+          # Jenkins Forensics Lab Maintenance Script
+          
+          # Backup Jenkins configuration
+          backup_jenkins() {
+              echo "Backing up Jenkins configuration..."
+              tar -czf /backup/jenkins/jenkins-config-$(date +%Y%m%d-%H%M%S).tar.gz \
+                  -C /var/lib/jenkins \
+                  --exclude=workspace \
+                  --exclude=builds \
+                  --exclude=logs \
+                  .
+              echo "Backup completed"
+          }
+          
+          # Clean old builds and artifacts
+          cleanup_jenkins() {
+              echo "Cleaning up old Jenkins data..."
+              find /var/lib/jenkins/workspace -type d -name "*" -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+              find /var/lib/jenkins/forensics/evidence -name "*.tmp" -mtime +1 -delete 2>/dev/null || true
+              echo "Cleanup completed"
+          }
+          
+          # Health check
+          health_check() {
+              echo "Performing Jenkins health check..."
+              if curl -s http://localhost:8080/login >/dev/null; then
+                  echo "Jenkins is responding"
+              else
+                  echo "Jenkins is not responding - attempting restart"
+                  systemctl restart jenkins
+              fi
+          }
+          
+          case "$1" in
+              backup)
+                  backup_jenkins
+                  ;;
+              cleanup)
+                  cleanup_jenkins
+                  ;;
+              health)
+                  health_check
+                  ;;
+              *)
+                  echo "Usage: $0 {backup|cleanup|health}"
+                  exit 1
+                  ;;
+          esac
+        dest: /usr/local/bin/jenkins-forensics-maintenance
+        mode: '0755'
+      when: not maintenance_script_exists.stat.exists
+
+    - name: Create Jenkins maintenance cron job
+      cron:
+        name: "Jenkins forensics maintenance"
+        minute: "0"
+        hour: "2"
+        job: "/usr/local/bin/jenkins-forensics-maintenance cleanup && /usr/local/bin/jenkins-forensics-maintenance backup"
+        user: root
+
+    - name: Wait for Jenkins to be fully operational before job deployment
+      wait_for:
+        port: "{{ jenkins_port }}"
+        host: localhost
+        delay: 60
+        timeout: 300
+
+    - name: Create Jenkins jobs directory if it doesn't exist
+      file:
+        path: /var/lib/jenkins/jobs
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: '0755'
+
+    - name: Deploy existing Jenkins job configurations
+      copy:
+        src: "../jenkins-jobs/"
+        dest: /tmp/jenkins-jobs/
+        mode: '0644'
+
+    - name: Create Jenkins CLI script for job deployment
+      copy:
+        content: |
+          #!/bin/bash
+          
+          JENKINS_URL="http://localhost:{{ jenkins_port }}"
+          JENKINS_CLI="/var/lib/jenkins/cli/jenkins-cli.jar"
+          JENKINS_USER="{{ jenkins_admin_user }}"
+          JENKINS_PASS="{{ jenkins_admin_password }}"
+          
+          # Wait for Jenkins to be ready
+          echo "Waiting for Jenkins to be ready..."
+          until curl -s "$JENKINS_URL/login" >/dev/null; do
+              echo "Jenkins not ready yet, waiting..."
+              sleep 10
+          done
+          
+          echo "Jenkins is ready, installing required plugins..."
+          
+          # Install required plugins for Pipeline jobs
+          java -jar "$JENKINS_CLI" -s "$JENKINS_URL" -auth "$JENKINS_USER:$JENKINS_PASS" \
+              install-plugin workflow-aggregator:latest || echo "Plugin already installed"
+          java -jar "$JENKINS_CLI" -s "$JENKINS_URL" -auth "$JENKINS_USER:$JENKINS_PASS" \
+              install-plugin pipeline-stage-view:latest || echo "Plugin already installed"
+          java -jar "$JENKINS_CLI" -s "$JENKINS_URL" -auth "$JENKINS_USER:$JENKINS_PASS" \
+              install-plugin workflow-job:latest || echo "Plugin already installed"
+          java -jar "$JENKINS_CLI" -s "$JENKINS_URL" -auth "$JENKINS_USER:$JENKINS_PASS" \
+              install-plugin workflow-cps:latest || echo "Plugin already installed"
+          
+          # Restart Jenkins to load plugins
+          echo "Restarting Jenkins to load plugins..."
+          java -jar "$JENKINS_CLI" -s "$JENKINS_URL" -auth "$JENKINS_USER:$JENKINS_PASS" restart
+          
+          # Wait for Jenkins to come back up
+          echo "Waiting for Jenkins to restart..."
+          sleep 30
+          until curl -s "$JENKINS_URL/login" >/dev/null; do
+              echo "Jenkins still restarting, waiting..."
+              sleep 10
+          done
+          
+          echo "Jenkins restarted, deploying jobs..."
+          
+          # Deploy existing jobs
+          for job_file in /tmp/jenkins-jobs/*.xml; do
+              if [ -f "$job_file" ]; then
+                  job_name=$(basename "$job_file" .xml)
+                  echo "Deploying job: $job_name"
+                  
+                  java -jar "$JENKINS_CLI" -s "$JENKINS_URL" -auth "$JENKINS_USER:$JENKINS_PASS" \
+                      create-job "$job_name" < "$job_file" || \
+                  java -jar "$JENKINS_CLI" -s "$JENKINS_URL" -auth "$JENKINS_USER:$JENKINS_PASS" \
+                      update-job "$job_name" < "$job_file"
+              fi
+          done
+          
+          echo "Job deployment completed"
+        dest: /tmp/deploy_jenkins_jobs.sh
+        mode: '0755'
+
+    - name: Deploy Jenkins jobs with plugin installation
+      shell: /tmp/deploy_jenkins_jobs.sh
+      register: job_deployment_result
+
+    - name: Create CAPE Sandbox analysis job
+      copy:
+        content: |
+          <?xml version='1.1' encoding='UTF-8'?>
+          <flow-definition plugin="workflow-job@1427.vb_67d25e050de">
+            <description>CAPE Sandbox malware analysis pipeline</description>
+            <keepDependencies>false</keepDependencies>
+            <properties>
+              <hudson.model.ParametersDefinitionProperty>
+                <parameterDefinitions>
+                  <hudson.model.StringParameterDefinition>
+                    <name>MALWARE_FILE</name>
+                    <description>Path to the malware sample to analyze</description>
+                    <defaultValue>/var/lib/jenkins/forensics/evidence/sample.exe</defaultValue>
+                    <trim>false</trim>
+                  </hudson.model.StringParameterDefinition>
+                  <hudson.model.StringParameterDefinition>
+                    <name>CASE_NUMBER</name>
+                    <description>Case number for tracking</description>
+                    <defaultValue>CAPE-001</defaultValue>
+                    <trim>false</trim>
+                  </hudson.model.StringParameterDefinition>
+                  <hudson.model.ChoiceParameterDefinition>
+                    <name>ANALYSIS_PACKAGE</name>
+                    <description>Analysis package to use</description>
+                    <choices>
+                      <string>exe</string>
+                      <string>dll</string>
+                      <string>pdf</string>
+                      <string>doc</string>
+                      <string>generic</string>
+                    </choices>
+                  </hudson.model.ChoiceParameterDefinition>
+                  <hudson.model.StringParameterDefinition>
+                    <name>TIMEOUT</name>
+                    <description>Analysis timeout in seconds</description>
+                    <defaultValue>300</defaultValue>
+                    <trim>false</trim>
+                  </hudson.model.StringParameterDefinition>
+                </parameterDefinitions>
+              </hudson.model.ParametersDefinitionProperty>
+            </properties>
+            <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps@3774.v6a_5f59e13dd6">
+              <script>
+          pipeline {
+              agent any
+              
+              stages {
+                  stage('Initialize') {
+                      steps {
+                          script {
+                              echo "Starting CAPE analysis for case: ${params.CASE_NUMBER}"
+                              echo "Malware file: ${params.MALWARE_FILE}"
+                              echo "Analysis package: ${params.ANALYSIS_PACKAGE}"
+                          }
+                      }
+                  }
+                  
+                  stage('Submit to CAPE') {
+                      steps {
+                          script {
+                              echo "Submitting sample to CAPE sandbox..."
+                              sh """
+                                  source /var/lib/jenkins/forensics/config/lab.conf
+                                  /var/lib/jenkins/forensics/scripts/forensics-automation.sh cape '${params.MALWARE_FILE}' '${params.ANALYSIS_PACKAGE}'
+                              """
+                          }
+                      }
+                  }
+                  
+                  stage('Monitor Analysis') {
+                      steps {
+                          script {
+                              echo "Monitoring CAPE analysis..."
+                              sh "sleep ${params.TIMEOUT}"
+                          }
+                      }
+                  }
+                  
+                  stage('Retrieve Results') {
+                      steps {
+                          script {
+                              echo "Retrieving CAPE analysis results..."
+                              sh """
+                                  mkdir -p /var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}/cape
+                                  echo 'CAPE Analysis Results for ${params.CASE_NUMBER}' > /var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}/cape/results.txt
+                                  echo 'Sample: ${params.MALWARE_FILE}' >> /var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}/cape/results.txt
+                                  echo 'Analysis completed at: \$(date)' >> /var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}/cape/results.txt
+                              """
+                          }
+                      }
+                  }
+                  
+                  stage('Send to ELK') {
+                      steps {
+                          script {
+                              echo "Sending results to ELK Stack..."
+                              sh """
+                                  source /var/lib/jenkins/forensics/config/lab.conf
+                                  echo '{"case": "${params.CASE_NUMBER}", "type": "cape_analysis", "sample": "${params.MALWARE_FILE}", "timestamp": "'"\$(date -Iseconds)"'"}' > /tmp/cape_result.json
+                                  /var/lib/jenkins/forensics/scripts/forensics-automation.sh elk-submit /tmp/cape_result.json forensics-cape
+                              """
+                          }
+                      }
+                  }
+              }
+              
+              post {
+                  always {
+                      archiveArtifacts artifacts: "forensics/reports/${params.CASE_NUMBER}/cape/*", fingerprint: true
+                  }
+              }
+          }
+              </script>
+              <sandbox>true</sandbox>
+            </definition>
+            <triggers/>
+            <disabled>false</disabled>
+          </flow-definition>
+        dest: /tmp/jenkins-jobs/cape-malware-analysis.xml
+        mode: '0644'
+
+    - name: Create Volatility3 memory analysis job
+      copy:
+        content: |
+          <?xml version='1.1' encoding='UTF-8'?>
+          <flow-definition plugin="workflow-job@1427.vb_67d25e050de">
+            <description>Volatility3 memory dump analysis pipeline</description>
+            <keepDependencies>false</keepDependencies>
+            <properties>
+              <hudson.model.ParametersDefinitionProperty>
+                <parameterDefinitions>
+                  <hudson.model.StringParameterDefinition>
+                    <name>MEMORY_DUMP</name>
+                    <description>Path to the memory dump file</description>
+                    <defaultValue>/var/lib/jenkins/forensics/evidence/memory.dmp</defaultValue>
+                    <trim>false</trim>
+                  </hudson.model.StringParameterDefinition>
+                  <hudson.model.StringParameterDefinition>
+                    <name>CASE_NUMBER</name>
+                    <description>Case number for tracking</description>
+                    <defaultValue>MEM-001</defaultValue>
+                    <trim>false</trim>
+                  </hudson.model.StringParameterDefinition>
+                  <hudson.model.BooleanParameterDefinition>
+                    <name>RUN_PSLIST</name>
+                    <description>Run process list analysis</description>
+                    <defaultValue>true</defaultValue>
+                  </hudson.model.BooleanParameterDefinition>
+                  <hudson.model.BooleanParameterDefinition>
+                    <name>RUN_NETSCAN</name>
+                    <description>Run network connections analysis</description>
+                    <defaultValue>true</defaultValue>
+                  </hudson.model.BooleanParameterDefinition>
+                  <hudson.model.BooleanParameterDefinition>
+                    <name>RUN_MALFIND</name>
+                    <description>Run malware detection analysis</description>
+                    <defaultValue>true</defaultValue>
+                  </hudson.model.BooleanParameterDefinition>
+                </parameterDefinitions>
+              </hudson.model.ParametersDefinitionProperty>
+            </properties>
+            <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps@3774.v6a_5f59e13dd6">
+              <script>
+          pipeline {
+              agent any
+              
+              stages {
+                  stage('Initialize') {
+                      steps {
+                          script {
+                              echo "Starting Volatility3 analysis for case: ${params.CASE_NUMBER}"
+                              echo "Memory dump: ${params.MEMORY_DUMP}"
+                          }
+                      }
+                  }
+                  
+                  stage('Basic System Info') {
+                      steps {
+                          script {
+                              echo "Running basic system information analysis..."
+                              sh """
+                                  mkdir -p /var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}/volatility
+                                  source /var/lib/jenkins/forensics/config/lab.conf
+                                  /var/lib/jenkins/forensics/scripts/forensics-automation.sh volatility '${params.MEMORY_DUMP}' '/var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}/volatility'
+                              """
+                          }
+                      }
+                  }
+                  
+                  stage('Process Analysis') {
+                      when {
+                          expression { return params.RUN_PSLIST }
+                      }
+                      steps {
+                          script {
+                              echo "Running process list analysis..."
+                              sh """
+                                  source /var/lib/jenkins/forensics/config/lab.conf
+                                  ssh -i "\$FORENSICS_SSH_KEY" "\$FORENSICS_SSH_USER@\$FORENSICS_SERVER" \\
+                                      "\$VOLATILITY3_PATH -f '${params.MEMORY_DUMP}' windows.pslist > '/var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}/volatility/pslist.txt'"
+                              """
+                          }
+                      }
+                  }
+                  
+                  stage('Network Analysis') {
+                      when {
+                          expression { return params.RUN_NETSCAN }
+                      }
+                      steps {
+                          script {
+                              echo "Running network connections analysis..."
+                              sh """
+                                  source /var/lib/jenkins/forensics/config/lab.conf
+                                  ssh -i "\$FORENSICS_SSH_KEY" "\$FORENSICS_SSH_USER@\$FORENSICS_SERVER" \\
+                                      "\$VOLATILITY3_PATH -f '${params.MEMORY_DUMP}' windows.netscan > '/var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}/volatility/netscan.txt'"
+                              """
+                          }
+                      }
+                  }
+                  
+                  stage('Malware Detection') {
+                      when {
+                          expression { return params.RUN_MALFIND }
+                      }
+                      steps {
+                          script {
+                              echo "Running malware detection analysis..."
+                              sh """
+                                  source /var/lib/jenkins/forensics/config/lab.conf
+                                  ssh -i "\$FORENSICS_SSH_KEY" "\$FORENSICS_SSH_USER@\$FORENSICS_SERVER" \\
+                                      "\$VOLATILITY3_PATH -f '${params.MEMORY_DUMP}' windows.malfind > '/var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}/volatility/malfind.txt'"
+                              """
+                          }
+                      }
+                  }
+                  
+                  stage('Send to ELK') {
+                      steps {
+                          script {
+                              echo "Sending results to ELK Stack..."
+                              sh """
+                                  source /var/lib/jenkins/forensics/config/lab.conf
+                                  echo '{"case": "${params.CASE_NUMBER}", "type": "volatility_analysis", "dump": "${params.MEMORY_DUMP}", "timestamp": "'"\$(date -Iseconds)"'"}' > /tmp/vol_result.json
+                                  /var/lib/jenkins/forensics/scripts/forensics-automation.sh elk-submit /tmp/vol_result.json forensics-volatility
+                              """
+                          }
+                      }
+                  }
+              }
+              
+              post {
+                  always {
+                      archiveArtifacts artifacts: "forensics/reports/${params.CASE_NUMBER}/volatility/*", fingerprint: true
+                  }
+              }
+          }
+              </script>
+              <sandbox>true</sandbox>
+            </definition>
+            <triggers/>
+            <disabled>false</disabled>
+          </flow-definition>
+        dest: /tmp/jenkins-jobs/volatility3-memory-analysis.xml
+        mode: '0644'
+
+    - name: Create comprehensive forensics pipeline job
+      copy:
+        content: |
+          <?xml version='1.1' encoding='UTF-8'?>
+          <flow-definition plugin="workflow-job@1427.vb_67d25e050de">
+            <description>Comprehensive forensics pipeline integrating all available tools</description>
+            <keepDependencies>false</keepDependencies>
+            <properties>
+              <hudson.model.ParametersDefinitionProperty>
+                <parameterDefinitions>
+                  <hudson.model.StringParameterDefinition>
+                    <name>CASE_NUMBER</name>
+                    <description>Case number for tracking</description>
+                    <defaultValue>FULL-001</defaultValue>
+                    <trim>false</trim>
+                  </hudson.model.StringParameterDefinition>
+                  <hudson.model.StringParameterDefinition>
+                    <name>EVIDENCE_PATH</name>
+                    <description>Path to evidence directory</description>
+                    <defaultValue>/var/lib/jenkins/forensics/evidence</defaultValue>
+                    <trim>false</trim>
+                  </hudson.model.StringParameterDefinition>
+                  <hudson.model.StringParameterDefinition>
+                    <name>INVESTIGATOR</name>
+                    <description>Lead investigator name</description>
+                    <defaultValue>Digital Forensics Team</defaultValue>
+                    <trim>false</trim>
+                  </hudson.model.StringParameterDefinition>
+                  <hudson.model.BooleanParameterDefinition>
+                    <name>ANALYZE_DISK_IMAGES</name>
+                    <description>Process disk images with Sleuth Kit</description>
+                    <defaultValue>true</defaultValue>
+                  </hudson.model.BooleanParameterDefinition>
+                  <hudson.model.BooleanParameterDefinition>
+                    <name>ANALYZE_MEMORY</name>
+                    <description>Process memory dumps with Volatility3</description>
+                    <defaultValue>true</defaultValue>
+                  </hudson.model.BooleanParameterDefinition>
+                  <hudson.model.BooleanParameterDefinition>
+                    <name>ANALYZE_MALWARE</name>
+                    <description>Process malware samples with CAPE</description>
+                    <defaultValue>true</defaultValue>
+                  </hudson.model.BooleanParameterDefinition>
+                  <hudson.model.BooleanParameterDefinition>
+                    <name>SEND_TO_ELK</name>
+                    <description>Send all results to ELK Stack</description>
+                    <defaultValue>true</defaultValue>
+                  </hudson.model.BooleanParameterDefinition>
+                </parameterDefinitions>
+              </hudson.model.ParametersDefinitionProperty>
+            </properties>
+            <definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps@3774.v6a_5f59e13dd6">
+              <script>
+          pipeline {
+              agent any
+              
+              stages {
+                  stage('Initialize Case') {
+                      steps {
+                          script {
+                              echo "Starting comprehensive forensics analysis for case: ${params.CASE_NUMBER}"
+                              echo "Evidence path: ${params.EVIDENCE_PATH}"
+                              echo "Investigator: ${params.INVESTIGATOR}"
+                              
+                              sh """
+                                  mkdir -p /var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}/{disk,memory,malware,final}
+                                  echo 'Case: ${params.CASE_NUMBER}' > /var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}/case_info.txt
+                                  echo 'Investigator: ${params.INVESTIGATOR}' >> /var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}/case_info.txt
+                                  echo 'Started: \$(date)' >> /var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}/case_info.txt
+                              """
+                          }
+                      }
+                  }
+                  
+                  stage('Disk Image Analysis') {
+                      when {
+                          expression { return params.ANALYZE_DISK_IMAGES }
+                      }
+                      steps {
+                          build job: 'disk-analysis-pipeline', parameters: [
+                              string(name: 'EVIDENCE_FILE', value: "${params.EVIDENCE_PATH}/disk.dd"),
+                              string(name: 'CASE_NUMBER', value: "${params.CASE_NUMBER}"),
+                              string(name: 'INVESTIGATOR', value: "${params.INVESTIGATOR}")
+                          ]
+                      }
+                  }
+                  
+                  stage('Memory Analysis') {
+                      when {
+                          expression { return params.ANALYZE_MEMORY }
+                      }
+                      steps {
+                          build job: 'volatility3-memory-analysis', parameters: [
+                              string(name: 'MEMORY_DUMP', value: "${params.EVIDENCE_PATH}/memory.dmp"),
+                              string(name: 'CASE_NUMBER', value: "${params.CASE_NUMBER}")
+                          ]
+                      }
+                  }
+                  
+                  stage('Malware Analysis') {
+                      when {
+                          expression { return params.ANALYZE_MALWARE }
+                      }
+                      steps {
+                          build job: 'cape-malware-analysis', parameters: [
+                              string(name: 'MALWARE_FILE', value: "${params.EVIDENCE_PATH}/malware.exe"),
+                              string(name: 'CASE_NUMBER', value: "${params.CASE_NUMBER}")
+                          ]
+                      }
+                  }
+                  
+                  stage('Consolidate Results') {
+                      steps {
+                          script {
+                              echo "Consolidating all analysis results..."
+                              sh """
+                                  cd /var/lib/jenkins/forensics/reports/${params.CASE_NUMBER}
+                                  echo 'COMPREHENSIVE FORENSICS ANALYSIS REPORT' > final/consolidated_report.txt
+                                  echo '==========================================' >> final/consolidated_report.txt
+                                  echo '' >> final/consolidated_report.txt
+                                  cat case_info.txt >> final/consolidated_report.txt
+                                  echo '' >> final/consolidated_report.txt
+                                  
+                                  if [ -d "disk" ]; then
+                                      echo 'DISK ANALYSIS SUMMARY:' >> final/consolidated_report.txt
+                                      echo '---------------------' >> final/consolidated_report.txt
+                                      ls -la disk/ >> final/consolidated_report.txt || echo 'No disk analysis results' >> final/consolidated_report.txt
+                                      echo '' >> final/consolidated_report.txt
+                                  fi
+                                  
+                                  if [ -d "memory" ]; then
+                                      echo 'MEMORY ANALYSIS SUMMARY:' >> final/consolidated_report.txt
+                                      echo '-----------------------' >> final/consolidated_report.txt
+                                      ls -la memory/ >> final/consolidated_report.txt || echo 'No memory analysis results' >> final/consolidated_report.txt
+                                      echo '' >> final/consolidated_report.txt
+                                  fi
+                                  
+                                  if [ -d "malware" ]; then
+                                      echo 'MALWARE ANALYSIS SUMMARY:' >> final/consolidated_report.txt
+                                      echo '------------------------' >> final/consolidated_report.txt
+                                      ls -la malware/ >> final/consolidated_report.txt || echo 'No malware analysis results' >> final/consolidated_report.txt
+                                      echo '' >> final/consolidated_report.txt
+                                  fi
+                                  
+                                  echo 'Analysis completed: \$(date)' >> final/consolidated_report.txt
+                              """
+                          }
+                      }
+                  }
+                  
+                  stage('Send to ELK Stack') {
+                      when {
+                          expression { return params.SEND_TO_ELK }
+                      }
+                      steps {
+                          script {
+                              echo "Sending consolidated results to ELK Stack..."
+                              sh """
+                                  source /var/lib/jenkins/forensics/config/lab.conf
+                                  echo '{"case": "${params.CASE_NUMBER}", "type": "comprehensive_analysis", "investigator": "${params.INVESTIGATOR}", "timestamp": "'"\$(date -Iseconds)"'", "status": "completed"}' > /tmp/comprehensive_result.json
+                                  /var/lib/jenkins/forensics/scripts/forensics-automation.sh elk-submit /tmp/comprehensive_result.json forensics-comprehensive
+                              """
+                          }
+                      }
+                  }
+              }
+              
+              post {
+                  always {
+                      archiveArtifacts artifacts: "forensics/reports/${params.CASE_NUMBER}/**/*", fingerprint: true
+                  }
+                  success {
+                      echo "Comprehensive forensics analysis completed successfully for case: ${params.CASE_NUMBER}"
+                  }
+                  failure {
+                      echo "Comprehensive forensics analysis failed for case: ${params.CASE_NUMBER}"
+                  }
+              }
+          }
+              </script>
+              <sandbox>true</sandbox>
+            </definition>
+            <triggers/>
+            <disabled>false</disabled>
+          </flow-definition>
+        dest: /tmp/jenkins-jobs/comprehensive-forensics-pipeline.xml
+        mode: '0644'
+
+    - name: Deploy additional Jenkins jobs
+      shell: |
+        JENKINS_URL="http://localhost:{{ jenkins_port }}"
+        JENKINS_CLI="/var/lib/jenkins/cli/jenkins-cli.jar"
+        JENKINS_USER="{{ jenkins_admin_user }}"
+        JENKINS_PASS="{{ jenkins_admin_password }}"
+        
+        for job_file in /tmp/jenkins-jobs/*.xml; do
+            if [ -f "$job_file" ]; then
+                job_name=$(basename "$job_file" .xml)
+                echo "Deploying job: $job_name"
+                
+                java -jar "$JENKINS_CLI" -s "$JENKINS_URL" -auth "$JENKINS_USER:$JENKINS_PASS" \
+                    create-job "$job_name" < "$job_file" || \
+                java -jar "$JENKINS_CLI" -s "$JENKINS_URL" -auth "$JENKINS_USER:$JENKINS_PASS" \
+                    update-job "$job_name" < "$job_file"
+            fi
+        done
+      ignore_errors: yes
+
+    - name: Display final Jenkins status and job information
+      debug:
+        msg: |
+          ================================================================
+          JENKINS FORENSICS LAB DEPLOYMENT COMPLETED
+          ================================================================
+          
+          Jenkins Status:
+          - Local URL: http://localhost:8080
+          - External URL: http://34.136.254.74:8080
+          - Admin User: {{ jenkins_admin_user }}
+          - Admin Password: {{ jenkins_admin_password }}
+          
+          Available Forensics Pipelines:
+          - CAPE Sandbox Malware Analysis
+          - Volatility3 Memory Analysis  
+          - Comprehensive Forensics Pipeline
+          - Disk Analysis Pipeline (from existing jobs)
+          
+          Troubleshooting External Access:
+          1. Verify firewall rule: gcloud compute firewall-rules list --filter="name~jenkins"
+          2. Check VM network tags: gcloud compute instances describe vm-formgt --zone=us-central1-a --format="get(tags.items)"
+          3. Add jenkins tag if missing: gcloud compute instances add-tags vm-formgt --tags=jenkins --zone=us-central1-a
+          4. Test connectivity: curl -I http://34.136.254.74:8080
+          
+          Jenkins is ready for forensics automation!
+          ================================================================
+        

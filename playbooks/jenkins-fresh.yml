@@ -1,0 +1,242 @@
+---
+- name: Deploy Jenkins on Management Server (Fresh Start)
+  hosts: management
+  become: yes
+  vars:
+    jenkins_admin_password: "ForensicsLab2025!"
+    jenkins_port: 8080
+  tasks:
+    - name: Stop existing Jenkins service if running
+      systemd:
+        name: jenkins
+        state: stopped
+      ignore_errors: yes
+
+    - name: Remove existing Jenkins installation
+      apt:
+        name: jenkins
+        state: absent
+        purge: yes
+      ignore_errors: yes
+
+    - name: Clean Jenkins directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/jenkins
+        - /var/cache/jenkins
+        - /var/log/jenkins
+        - /etc/default/jenkins
+      ignore_errors: yes
+
+    - name: Install Java 21 for Jenkins
+      apt:
+        name: openjdk-21-jdk
+        state: present
+        update_cache: yes
+
+    - name: Add Jenkins repository key
+      apt_key:
+        url: https://pkg.jenkins.io/debian-stable/jenkins.io-2023.key
+        state: present
+
+    - name: Add Jenkins repository
+      apt_repository:
+        repo: deb https://pkg.jenkins.io/debian-stable binary/
+        state: present
+        update_cache: yes
+
+    - name: Install Jenkins
+      apt:
+        name: jenkins
+        state: present
+
+    - name: Configure Jenkins for external access
+      lineinfile:
+        path: /etc/default/jenkins
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        create: yes
+      loop:
+        - { regexp: '^HTTP_PORT=', line: 'HTTP_PORT={{ jenkins_port }}' }
+        - { regexp: '^JENKINS_ARGS=', line: 'JENKINS_ARGS="--httpListenAddress=0.0.0.0"' }
+
+    - name: Create Jenkins directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: '0755'
+      loop:
+        - /var/lib/jenkins/jobs
+        - /var/lib/jenkins/workspace
+        - /var/lib/jenkins/scripts
+        - /var/log/jenkins
+
+    - name: Start and enable Jenkins
+      systemd:
+        name: jenkins
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Wait for Jenkins to start
+      wait_for:
+        host: localhost
+        port: "{{ jenkins_port }}"
+        delay: 30
+        timeout: 300
+
+    - name: Get Jenkins initial admin password
+      slurp:
+        src: /var/lib/jenkins/secrets/initialAdminPassword
+      register: jenkins_initial_password
+
+    - name: Display Jenkins initial password
+      debug:
+        msg: "Jenkins initial admin password: {{ jenkins_initial_password.content | b64decode }}"
+
+    - name: Install Jenkins CLI
+      get_url:
+        url: "http://localhost:{{ jenkins_port }}/jnlpJars/jenkins-cli.jar"
+        dest: /opt/jenkins-cli.jar
+        mode: '0644'
+
+    - name: Create Jenkins job directory structure
+      file:
+        path: "/var/lib/jenkins/jobs/{{ item }}"
+        state: directory
+        owner: jenkins
+        group: jenkins
+        mode: '0755'
+      loop:
+        - forensics-processing
+        - evidence-intake
+        - case-management
+
+    - name: Create Jenkins configuration script for initial setup
+      copy:
+        content: |
+          #!/bin/bash
+          # Skip the initial setup wizard
+          echo "$(jenkins --version 2>/dev/null || echo '2.516.1')" > /var/lib/jenkins/jenkins.install.InstallUtil.lastExecVersion
+          echo "$(jenkins --version 2>/dev/null || echo '2.516.1')" > /var/lib/jenkins/jenkins.install.UpgradeWizard.state
+          mkdir -p /var/lib/jenkins/plugins
+          mkdir -p /var/lib/jenkins/init.groovy.d
+          
+          # Create Groovy script to setup admin user
+          cat > /var/lib/jenkins/init.groovy.d/basic-security.groovy << 'EOF'
+          #!groovy
+          
+          import jenkins.model.*
+          import hudson.security.*
+          import hudson.security.csrf.DefaultCrumbIssuer
+          import jenkins.security.s2m.AdminWhitelistRule
+          
+          def instance = Jenkins.getInstance()
+          
+          // Create admin user
+          def hudsonRealm = new HudsonPrivateSecurityRealm(false)
+          hudsonRealm.createAccount("admin", "{{ jenkins_admin_password }}")
+          instance.setSecurityRealm(hudsonRealm)
+          
+          // Set authorization strategy
+          def strategy = new FullControlOnceLoggedInAuthorizationStrategy()
+          strategy.setDenyAnonymousReadAccess(true)
+          instance.setAuthorizationStrategy(strategy)
+          
+          // Enable CSRF protection
+          instance.setCrumbIssuer(new DefaultCrumbIssuer(true))
+          
+          // Save configuration
+          instance.save()
+          
+          println "Admin user created successfully"
+          EOF
+          
+          # Create basic configuration
+          cat > /var/lib/jenkins/config.xml << 'EOF'
+          <?xml version='1.1' encoding='UTF-8'?>
+          <hudson>
+            <disabledAdministrativeMonitors/>
+            <version>2.516.1</version>
+            <installStateName>RUNNING</installStateName>
+            <numExecutors>2</numExecutors>
+            <mode>NORMAL</mode>
+            <useSecurity>false</useSecurity>
+            <disableRememberMe>false</disableRememberMe>
+            <projectNamingStrategy class="jenkins.model.ProjectNamingStrategy$DefaultProjectNamingStrategy"/>
+            <workspaceDir>${JENKINS_HOME}/workspace/${ITEM_FULLNAME}</workspaceDir>
+            <buildsDir>${ITEM_ROOTDIR}/builds</buildsDir>
+            <systemMessage>Digital Forensics Lab - Jenkins Automation Server</systemMessage>
+          </hudson>
+          EOF
+          
+          # Set proper ownership
+          chown -R jenkins:jenkins /var/lib/jenkins
+        dest: /tmp/setup_jenkins.sh
+        mode: '0755'
+
+    - name: Setup Jenkins initial configuration
+      shell: /tmp/setup_jenkins.sh
+      
+    - name: Restart Jenkins to apply configuration
+      systemd:
+        name: jenkins
+        state: restarted
+        
+    - name: Wait for Jenkins to restart
+      wait_for:
+        host: localhost
+        port: "{{ jenkins_port }}"
+        delay: 30
+        timeout: 300
+
+    - name: Verify Jenkins is listening on all interfaces
+      shell: netstat -tlnp | grep :{{ jenkins_port }}
+      register: jenkins_netstat
+
+    - name: Display Jenkins network status
+      debug:
+        msg: "Jenkins network binding: {{ jenkins_netstat.stdout_lines }}"
+
+    - name: Test Jenkins local access
+      uri:
+        url: "http://localhost:{{ jenkins_port }}"
+        method: GET
+        status_code: [200, 403]
+      register: jenkins_local_test
+
+    - name: Display Jenkins access information
+      debug:
+        msg: |
+          ================================================================
+          JENKINS DEPLOYMENT COMPLETED SUCCESSFULLY
+          ================================================================
+          
+          🚀 Jenkins is now running and accessible at:
+          External: http://{{ ansible_default_ipv4.address }}:{{ jenkins_port }}
+          Internal: http://localhost:{{ jenkins_port }}
+          
+          📋 AUTOMATED ADMIN USER CREATED:
+          Username: admin
+          Password: {{ jenkins_admin_password }}
+          
+          🔧 Network Status:
+          {{ jenkins_netstat.stdout_lines | join('\n') }}
+          
+          ✅ Local Access Test: {{ jenkins_local_test.status }}
+          
+          📁 Job directories created:
+          - forensics-processing: For automated evidence processing pipelines
+          - evidence-intake: For evidence ingestion and validation
+          - case-management: For case workflow automation
+          
+          🔍 Next Steps:
+          1. Test external access: curl -I http://{{ ansible_default_ipv4.address }}:{{ jenkins_port }}
+          2. Open Jenkins in browser at the external URL
+          3. Login with admin credentials
+          4. Configure forensics automation jobs
+          ================================================================
